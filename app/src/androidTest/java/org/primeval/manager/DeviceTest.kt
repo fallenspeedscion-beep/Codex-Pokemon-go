@@ -56,6 +56,66 @@ class DeviceTest {
     }
 
     @Test
+    fun saveThenCorrectManualRecordThroughEditor() {
+        val nickname = "Camp ★ " + System.nanoTime().toString().takeLast(4)
+        ActivityScenario.launch(MainActivity::class.java).use { screen ->
+            fun pressWhenReady(label: String, prefix: Boolean = false) {
+                val deadline = android.os.SystemClock.elapsedRealtime() + 60000
+                var pressed = false
+                while (!pressed && android.os.SystemClock.elapsedRealtime() < deadline) {
+                    screen.onActivity {
+                        val matches =
+                            android.view.inspector.WindowInspector.getGlobalWindowViews()
+                                .flatMap { root -> views(root).filterIsInstance<Button>().toList() }
+                                .filter {
+                                    if (prefix) it.text.startsWith(label)
+                                    else it.text.toString().equals(label, true)
+                                }
+                        if (matches.size == 1) {
+                            matches.single().performClick()
+                            pressed = true
+                        }
+                    }
+                    if (!pressed) Thread.sleep(100)
+                }
+                assertTrue("Missing button $label", pressed)
+            }
+            fun input(hint: String, value: String) =
+                screen.onActivity {
+                    val editor =
+                        android.view.inspector.WindowInspector.getGlobalWindowViews()
+                            .flatMap { root ->
+                                views(root).filterIsInstance<android.widget.EditText>().toList()
+                            }
+                            .single { it.hint == hint }
+                    editor.setText(value)
+                }
+            pressWhenReady("Add a Pokémon")
+            input("Species", "Pikachu")
+            input("Current nickname", nickname)
+            input("Attack IV", "14")
+            input("Defense IV", "15")
+            input("Stamina IV", "15")
+            pressWhenReady("Save")
+            pressWhenReady(nickname, true)
+            input("Attack IV", "15")
+            pressWhenReady("Save")
+            val ctx =
+                androidx.test.platform.app.InstrumentationRegistry.getInstrumentation()
+                    .targetContext
+            val deadline = android.os.SystemClock.elapsedRealtime() + 30000
+            val dao = Store.open(ctx).catalog()
+            while (
+                dao.all().singleOrNull { it.nickname == nickname }?.attack != 15 &&
+                    android.os.SystemClock.elapsedRealtime() < deadline
+            ) Thread.sleep(100)
+            val record = dao.all().single { it.nickname == nickname }
+            assertEquals(100.0, record.ivPercent!!, 0.0)
+            assertEquals("Manually reviewed", record.verification)
+        }
+    }
+
+    @Test
     fun bundledOcrReadsSyntheticDetails() {
         val bitmap = Bitmap.createBitmap(720, 900, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(bitmap)

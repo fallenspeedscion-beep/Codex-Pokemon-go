@@ -484,11 +484,12 @@ class MainActivity : Activity() {
                 isChecked = true
             }
         body.addView(moves)
-        val follow = CheckBox(this).apply { text = "Follow labelled appraisal and Next controls" }
+        val follow =
+            CheckBox(this).apply { text = "Follow appraisal controls and advance after review" }
         body.addView(follow)
         label(
             body,
-            "The optional accessibility service reads the game window on demand. Automatic mode also operates uniquely labelled rename controls. You can pause or stop from its panel.",
+            "The optional accessibility service reads the game window and can swipe verified detail pages. Automatic mode also operates uniquely labelled rename controls. You can pause or stop from its panel.",
         )
         btn(body, "Accessibility settings") {
             startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))

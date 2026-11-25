@@ -1,6 +1,7 @@
 package org.primeval.manager
 
 import android.accessibilityservice.AccessibilityService
+import android.accessibilityservice.GestureDescription
 import android.app.AlertDialog
 import android.content.*
 import android.graphics.*
@@ -44,6 +45,7 @@ class GameScanner : AccessibilityService() {
     private var review: AlertDialog? = null
     private lateinit var option: Button
     private var moveEvidence = ""
+    private var advancing = false
     private var nextRequested = false
     private var follow = false
     private var returnScrolls = 0
@@ -113,6 +115,7 @@ class GameScanner : AccessibilityService() {
         approvedSpecies = null
         busy = false
         rename = Rename.NONE
+        advancing = false
         session.pause(why)
         show(why)
     }
@@ -124,6 +127,7 @@ class GameScanner : AccessibilityService() {
         review = null
         approvedSpecies = null
         busy = false
+        advancing = false
         session.stop()
         rename = Rename.NONE
         panel?.let { getSystemService(WindowManager::class.java).removeView(it) }
@@ -239,7 +243,7 @@ class GameScanner : AccessibilityService() {
                 View.VISIBLE
             else View.GONE
         option.text =
-            if (session.phase == Phase.NEXT) "Advance using labelled Next control"
+            if (session.phase == Phase.NEXT) "Advance in filtered group"
             else if (session.phase == Phase.APPRAISAL) "Keep IVs as uncertain"
             else "Keep move reading as uncertain"
         read.isEnabled = !busy && session.phase != Phase.PAUSED
@@ -247,6 +251,7 @@ class GameScanner : AccessibilityService() {
     }
 
     private fun reject(message: String) {
+        advancing = false
         log("${session.phase}: $message")
         busy = false
         session.fail(message)
@@ -279,7 +284,7 @@ class GameScanner : AccessibilityService() {
             editName()
             return
         }
-        frame(token) { first, _ ->
+        frame(token) { first, firstLines ->
             handler.postDelayed(
                 {
                     if (token == generation)
@@ -287,7 +292,12 @@ class GameScanner : AccessibilityService() {
                             busy = false
                             val value = consensus(first, second)
                             if (value == null) {
-                                if (session.phase == Phase.MOVES && first == null && second == null)
+                                if (
+                                    session.phase == Phase.MOVES &&
+                                        first == null &&
+                                        second == null &&
+                                        firstLines.map { it.text } == lines.map { it.text }
+                                )
                                     tryScroll(lines)
                                 else if (
                                     session.phase == Phase.REVIEW &&
@@ -298,13 +308,19 @@ class GameScanner : AccessibilityService() {
                                 ) {
                                     val scroll = nodes().singleOrNull { it.isScrollable }
                                     if (
-                                        scroll?.performAction(
-                                            AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD
-                                        ) == true
+                                        Recognition.moves(lines) != null &&
+                                            scroll?.performAction(
+                                                AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD
+                                            ) == true
                                     ) {
                                         returnScrolls++
                                         scheduleRead()
                                         show("Returning to detail header")
+                                    } else if (
+                                        Recognition.moves(lines) != null &&
+                                            swipePage(horizontal = false, back = true)
+                                    ) {
+                                        returnScrolls++
                                     } else reject("Return to the top of the details page")
                                 } else reject("Uncertain or disagreeing observations")
                             } else accept(value)
@@ -322,69 +338,82 @@ class GameScanner : AccessibilityService() {
             reject("Window capture requires Android 14+ and the game foreground")
             return
         }
-        takeScreenshotOfWindow(
-            root.windowId,
-            mainExecutor,
-            object : TakeScreenshotCallback {
-                override fun onFailure(code: Int) {
-                    if (token == generation) reject("Capture failed ($code)")
-                }
-
-                override fun onSuccess(result: ScreenshotResult) {
-                    val buffer = result.hardwareBuffer
-                    val bmp =
-                        try {
-                            if (token == generation)
-                                Bitmap.wrapHardwareBuffer(buffer, result.colorSpace)
-                                    ?.copy(Bitmap.Config.ARGB_8888, false)
-                            else null
-                        } finally {
-                            buffer.close()
-                        }
-                    if (token != generation) return
-                    if (bmp == null) {
-                        reject("Unreadable frame")
-                        return
+        try {
+            takeScreenshotOfWindow(
+                root.windowId,
+                mainExecutor,
+                object : TakeScreenshotCallback {
+                    override fun onFailure(code: Int) {
+                        if (token == generation) reject("Capture failed ($code)")
                     }
-                    reader.process(InputImage.fromBitmap(bmp, 0)).addOnCompleteListener { task ->
-                        try {
-                            if (token != generation) return@addOnCompleteListener
-                            if (!task.isSuccessful || window()?.windowId != root.windowId) {
-                                reject("Game window or text unavailable")
-                                return@addOnCompleteListener
+
+                    override fun onSuccess(result: ScreenshotResult) {
+                        val buffer = result.hardwareBuffer
+                        val bmp =
+                            try {
+                                if (token == generation)
+                                    Bitmap.wrapHardwareBuffer(buffer, result.colorSpace)
+                                        ?.copy(Bitmap.Config.ARGB_8888, false)
+                                else null
+                            } finally {
+                                buffer.close()
                             }
-                            val lines =
-                                task.result.textBlocks
-                                    .flatMap { it.lines }
-                                    .mapNotNull { line ->
-                                        line.boundingBox?.let {
-                                            Line(line.text, it.left, it.top, it.right, it.bottom)
-                                        }
-                                    }
-                            val value =
-                                when (session.phase) {
-                                    Phase.APPRAISAL ->
-                                        Recognition.bars(
-                                            lines,
-                                            object : Pixels {
-                                                override val width = bmp.width
-                                                override val height = bmp.height
-
-                                                override fun rgb(x: Int, y: Int) =
-                                                    bmp.getPixel(x, y)
-                                            },
-                                        )
-                                    Phase.MOVES -> Recognition.moves(lines)
-                                    else -> Recognition.detail(lines)
+                        if (token != generation) return
+                        if (bmp == null) {
+                            reject("Unreadable frame")
+                            return
+                        }
+                        reader.process(InputImage.fromBitmap(bmp, 0)).addOnCompleteListener { task
+                            ->
+                            try {
+                                if (token != generation) return@addOnCompleteListener
+                                if (!task.isSuccessful || window()?.windowId != root.windowId) {
+                                    reject("Game window or text unavailable")
+                                    return@addOnCompleteListener
                                 }
-                            done(value, lines)
-                        } finally {
-                            bmp.recycle()
+                                val lines =
+                                    task.result.textBlocks
+                                        .flatMap { it.lines }
+                                        .mapNotNull { line ->
+                                            line.boundingBox?.let {
+                                                Line(
+                                                    line.text,
+                                                    it.left,
+                                                    it.top,
+                                                    it.right,
+                                                    it.bottom,
+                                                )
+                                            }
+                                        }
+                                val value: Any? =
+                                    when (session.phase) {
+                                        Phase.APPRAISAL ->
+                                            Recognition.bars(
+                                                lines,
+                                                object : Pixels {
+                                                    override val width = bmp.width
+                                                    override val height = bmp.height
+
+                                                    override fun rgb(x: Int, y: Int) =
+                                                        bmp.getPixel(x, y)
+                                                },
+                                            )
+                                        Phase.MOVES -> Recognition.moves(lines)
+                                        else -> Recognition.detail(lines)
+                                    }
+                                done(value, lines)
+                            } catch (e: RuntimeException) {
+                                suspendScan("Observation failed: ${e.javaClass.simpleName}")
+                            } finally {
+                                bmp.recycle()
+                            }
                         }
                     }
-                }
-            },
-        )
+                },
+            )
+        } catch (e: RuntimeException) {
+            suspendScan("Window capture unavailable: ${e.javaClass.simpleName}")
+        }
     }
 
     private fun nodes(): List<AccessibilityNodeInfo> {
@@ -397,6 +426,7 @@ class GameScanner : AccessibilityService() {
             result.add(n)
             for (i in 0 until n.childCount) n.getChild(i)?.let { queue.add(it) }
         }
+        if (queue.isNotEmpty()) return emptyList()
         return result.filter {
             it.isVisibleToUser && it.isEnabled && it.packageName?.toString() == game
         }
@@ -465,50 +495,112 @@ class GameScanner : AccessibilityService() {
     }
 
     private fun requestNext() {
-        val token = ++generation
-        busy = true
-        show("Checking before advance")
-        frame(token) { value, _ ->
-            if (value != original || value == null) {
-                suspendScan("Current page changed before advance")
-                return@frame
-            }
-            nextRequested = true
-            val clicked =
-                control("Next Pokémon")?.performAction(AccessibilityNodeInfo.ACTION_CLICK) == true
-            busy = false
-            show(
-                if (clicked) "Checking next details…"
-                else "No unique Next Pokémon control. Advance manually or stop."
-            )
-            if (clicked)
-                handler.postDelayed(
-                    { if (generation == token && session.phase == Phase.NEXT) captureStep() },
-                    750,
-                )
+        advancing = true
+        captureStep()
+    }
+
+    private fun advanceVerified(value: Any) {
+        advancing = false
+        if (value != original || session.phase != Phase.NEXT) {
+            suspendScan("Current page changed before advance")
+            return
         }
+        nextRequested = true
+        val clicked =
+            control("Next Pokémon")?.performAction(AccessibilityNodeInfo.ACTION_CLICK) == true
+        if (!clicked && swipePage(horizontal = true, back = false)) return
+        show(if (clicked) "Checking next details…" else "Advance manually or stop.")
+        if (clicked) scheduleRead()
+    }
+
+    // Gestures only navigate a verified detail window. Edit and submit always require
+    // unique semantic controls. A completed gesture triggers a fresh observation.
+    private fun swipePage(horizontal: Boolean, back: Boolean): Boolean {
+        val root = window() ?: return false
+        val gameWindow =
+            windows.singleOrNull { it.id == root.windowId && it.isActive } ?: return false
+        val bounds = Rect().also { gameWindow.getBoundsInScreen(it) }
+        val overlay = Rect()
+        if (panel?.getGlobalVisibleRect(overlay) != true || bounds.isEmpty) return false
+        val location = IntArray(2)
+        panel?.getLocationOnScreen(location)
+        val top = maxOf(location[1] + overlay.height() + 24, bounds.top + bounds.height() / 3)
+        val bottom = bounds.top + bounds.height() * 4 / 5
+        if (bottom - top < bounds.height() / 5) return false
+        val x = bounds.centerX().toFloat()
+        val y = (top + bottom) / 2f
+        val path =
+            Path().apply {
+                if (horizontal) {
+                    moveTo(bounds.left + bounds.width() * 0.78f, y)
+                    lineTo(bounds.left + bounds.width() * 0.22f, y)
+                } else {
+                    moveTo(x, (if (back) top else bottom).toFloat())
+                    lineTo(x, (if (back) bottom else top).toFloat())
+                }
+            }
+        val gesture =
+            GestureDescription.Builder()
+                .addStroke(GestureDescription.StrokeDescription(path, 0, 400))
+                .build()
+        val token = generation
+        busy = true
+        val started =
+            dispatchGesture(
+                gesture,
+                object : GestureResultCallback() {
+                    override fun onCompleted(description: GestureDescription) {
+                        if (token == generation) {
+                            busy = false
+                            show("Verifying page after swipe")
+                            scheduleRead()
+                        }
+                    }
+
+                    override fun onCancelled(description: GestureDescription) {
+                        if (token == generation) suspendScan("Navigation gesture interrupted")
+                    }
+                },
+                handler,
+            )
+        if (!started) busy = false
+        return started
     }
 
     private fun tryScroll(lines: List<Line>) {
         moveEvidence = lines.joinToString(" | ") { it.text }.take(750)
         val fingerprint = lines.joinToString("|") { it.text }
-        val scroll = nodes().singleOrNull { it.isScrollable }
+        val detail = Recognition.detail(lines)
+        val sectionLabels =
+            listOf("Gyms & Raids", "Trainer Battles", "Power Up", "New Attack", "Stardust", "Candy")
+        val recognizedSection =
+            sectionLabels.count { label -> lines.any { it.text.equals(label, true) } } >= 2
         if (
-            scrolls >= 3 ||
-                fingerprint == lastScroll ||
-                scroll == null ||
-                !scroll.performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD)
+            (detail != null && detail != session.details) || (detail == null && !recognizedSection)
         ) {
-            reject("Move section uncertain. Scroll manually or pause.")
+            reject("Detail page unverified. Show the regular attacks.")
+            return
+        }
+        if (scrolls >= 3 || fingerprint == lastScroll) {
+            reject("Scroll limit or unchanged page. Review moves manually.")
             return
         }
         scrolls++
         lastScroll = fingerprint
-        show("Scroll requested. Read again to verify the new view.")
-        if (follow) scheduleRead()
+        val scroll = nodes().singleOrNull { it.isScrollable }
+        if (scroll?.performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD) == true) {
+            show("Verifying scrolled page")
+            scheduleRead()
+        } else if (!swipePage(horizontal = false, back = false)) {
+            reject("Scroll unavailable. Move the page manually.")
+        }
     }
 
     private fun accept(value: Any) {
+        if (advancing) {
+            advanceVerified(value)
+            return
+        }
         if (rename != Rename.NONE) {
             verifyRename(value as? Detail)
             return

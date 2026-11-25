@@ -48,16 +48,23 @@ class GameScanner : AccessibilityService() {
     private var advancing = false
     private var nextRequested = false
     private var follow = false
-    private var diagnostics=false
-    private var closing=false
-    private var appraisalSpecies:String?=null
-    private var draftStored=false
-    private var insertionPending=false
-    private val actionCounts=mutableMapOf<NavKind,Int>()
+    private var diagnostics = false
+    private var observedRows = emptyList<String>()
+    private var lastReturn = ""
+    private var closing = false
+    private var appraisalSpecies: String? = null
+    private var draftStored = false
+    private var insertionPending = false
+    private val actionCounts = mutableMapOf<NavKind, Int>()
     private var returnScrolls = 0
-    private fun trace(msg:String){
-        if(diagnostics)log("PPM2 state=${session.phase} foreground=${if(window()!=null)"game" else "other"} retry=${session.failures} scroll=$scrolls/$returnScrolls $msg")
+
+    private fun trace(msg: String) {
+        if (diagnostics)
+            log(
+                "PPM2 state=${session.phase} foreground=${if(window()!=null)"game" else "other"} retry=${session.failures} scroll=$scrolls/$returnScrolls $msg"
+            )
     }
+
     private var original: Detail? = null
 
     private enum class Rename {
@@ -86,6 +93,15 @@ class GameScanner : AccessibilityService() {
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+        if (
+            panel != null &&
+                !startedReading &&
+                follow &&
+                !busy &&
+                session.phase == Phase.DETAILS &&
+                window() != null
+        )
+            scheduleRead()
         if (
             review == null &&
                 panel != null &&
@@ -117,7 +133,8 @@ class GameScanner : AccessibilityService() {
 
     private fun suspendScan(why: String) {
         if (panel == null || session.phase == Phase.PAUSED) return
-        trace("paused=$why");log(why)
+        trace("paused=$why")
+        log(why)
         generation++
         review?.dismiss()
         review = null
@@ -144,9 +161,19 @@ class GameScanner : AccessibilityService() {
         startedReading = false
     }
 
-    fun start(id: Long, name: String, selectedMode: String, moves: Boolean, followLabels: Boolean, diagnostic:Boolean=false) {
+    fun start(
+        id: Long,
+        name: String,
+        selectedMode: String,
+        moves: Boolean,
+        followLabels: Boolean,
+        diagnostic: Boolean = false,
+    ) {
         finishSession()
-        diagnostics=diagnostic;closing=false;draftStored=false;insertionPending=false
+        diagnostics = diagnostic
+        closing = false
+        draftStored = false
+        insertionPending = false
         follow = followLabels
         profile = id
         profileName = name
@@ -181,6 +208,8 @@ class GameScanner : AccessibilityService() {
                 if (session.phase == Phase.PAUSED) {
                     generation++
                     session.resume()
+                    closing = false
+                    actionCounts.clear()
                     show()
                 } else suspendScan("Paused by user")
             }
@@ -190,7 +219,10 @@ class GameScanner : AccessibilityService() {
                 isAllCaps = false
                 box.addView(this)
                 setOnClickListener {
-                    if(session.phase==Phase.PAUSED){savePartial();return@setOnClickListener}
+                    if (session.phase == Phase.PAUSED) {
+                        savePartial()
+                        return@setOnClickListener
+                    }
                     if (session.phase == Phase.APPRAISAL) {
                         session.keepUncertainBars()
                         show("IVs remain unknown")
@@ -216,6 +248,7 @@ class GameScanner : AccessibilityService() {
         getSystemService(WindowManager::class.java).addView(box, params)
         panel = box
         show()
+        if (follow) scheduleRead()
     }
 
     private fun show(message: String = "") {
@@ -248,13 +281,19 @@ class GameScanner : AccessibilityService() {
             if (
                 !busy &&
                     rename == Rename.NONE &&
-                    ((session.phase==Phase.PAUSED && session.details!=null && !draftStored && !insertionPending) || session.phase in listOf(Phase.APPRAISAL, Phase.MOVES) &&
-                        session.failures > 0 || session.phase == Phase.NEXT && !nextRequested)
+                    ((session.phase == Phase.PAUSED &&
+                        session.details != null &&
+                        !draftStored &&
+                        !insertionPending) ||
+                        session.phase in listOf(Phase.APPRAISAL, Phase.MOVES) &&
+                            session.failures > 0 ||
+                        session.phase == Phase.NEXT && !nextRequested)
             )
                 View.VISIBLE
             else View.GONE
         option.text =
-            if(session.phase==Phase.PAUSED)"Save incomplete header and stop" else if (session.phase == Phase.NEXT) "Advance in filtered group"
+            if (session.phase == Phase.PAUSED) "Save incomplete header and stop"
+            else if (session.phase == Phase.NEXT) "Advance in filtered group"
             else if (session.phase == Phase.APPRAISAL) "Keep IVs as uncertain"
             else "Keep move reading as uncertain"
         read.isEnabled = !busy && session.phase != Phase.PAUSED
@@ -265,7 +304,8 @@ class GameScanner : AccessibilityService() {
         advancing = false
         log("${session.phase}: $message")
         busy = false
-        trace("failure=$message");session.fail(message)
+        trace("failure=$message")
+        session.fail(message)
         if (session.phase == Phase.PAUSED) rename = Rename.NONE
         show(message)
     }
@@ -301,7 +341,39 @@ class GameScanner : AccessibilityService() {
                     if (token == generation)
                         frame(token) { second, lines ->
                             busy = false
-                            if(first is Scene && second is Scene){observeScene(first,second,token);return@frame}
+                            if (first is Scene && second is Scene) {
+                                observeScene(first, second, token)
+                                return@frame
+                            }
+                            if (
+                                session.phase == Phase.MOVES &&
+                                    !closing &&
+                                    first == second &&
+                                    firstLines.map { it.text } == lines.map { it.text }
+                            ) {
+                                val page = MoveViewport.read(lines)
+                                val merged = page.extend(observedRows)
+                                if (
+                                    merged != null &&
+                                        merged.size <= 3 &&
+                                        merged.distinct().size == merged.size &&
+                                        merged.isNotEmpty()
+                                ) {
+                                    observedRows = merged
+                                    if (merged.size == 3 || (merged.size == 2 && page.end)) {
+                                        accept(
+                                            Attacks(merged[0], merged[1], merged.getOrNull(2), true)
+                                        )
+                                        return@frame
+                                    }
+                                    tryScroll(lines)
+                                    return@frame
+                                }
+                                if (observedRows.isNotEmpty()) {
+                                    reject("Regular move rows lost overlap after scroll")
+                                    return@frame
+                                }
+                            }
                             val value = consensus(first, second)
                             if (value == null) {
                                 if (
@@ -316,22 +388,19 @@ class GameScanner : AccessibilityService() {
                                         follow &&
                                         first == null &&
                                         second == null &&
-                                        returnScrolls < 3
+                                        returnScrolls < 5 &&
+                                        verifiedReturn(firstLines, lines)
                                 ) {
                                     val scroll = nodes().singleOrNull { it.isScrollable }
                                     if (
-                                        Recognition.moves(lines) != null &&
-                                            scroll?.performAction(
-                                                AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD
-                                            ) == true
+                                        scroll?.performAction(
+                                            AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD
+                                        ) == true
                                     ) {
                                         returnScrolls++
                                         scheduleRead()
                                         show("Returning to detail header")
-                                    } else if (
-                                        Recognition.moves(lines) != null &&
-                                            swipePage(horizontal = false, back = true)
-                                    ) {
+                                    } else if (swipePage(horizontal = false, back = true)) {
                                         returnScrolls++
                                     } else reject("Return to the top of the details page")
                                 } else reject("Uncertain or disagreeing observations")
@@ -356,7 +425,10 @@ class GameScanner : AccessibilityService() {
                 mainExecutor,
                 object : TakeScreenshotCallback {
                     override fun onFailure(code: Int) {
-                        if (token == generation){trace("capture=failed code=$code");reject("Capture failed ($code)")}
+                        if (token == generation) {
+                            trace("capture=failed code=$code")
+                            reject("Capture failed ($code)")
+                        }
                     }
 
                     override fun onSuccess(result: ScreenshotResult) {
@@ -398,12 +470,22 @@ class GameScanner : AccessibilityService() {
                                             }
                                         }
                                 trace("capture=ok")
-                                val value:Any?=when{
-                                    session.phase==Phase.APPRAISAL || closing->ScanNavigation.inspect(lines,BitmapPixels(bmp),session.details,closing)
-                                    session.phase==Phase.MOVES->Recognition.moves(lines)
-                                    else->Recognition.detail(lines)
-                                }
-                                if(session.phase==Phase.MOVES)trace("ordinaryMoves=${if(value==null)"not located" else "detected"}")
+                                val value: Any? =
+                                    when {
+                                        session.phase == Phase.APPRAISAL || closing ->
+                                            ScanNavigation.inspect(
+                                                lines,
+                                                BitmapPixels(bmp),
+                                                session.details,
+                                                closing,
+                                            )
+                                        session.phase == Phase.MOVES -> Recognition.moves(lines)
+                                        else -> Recognition.detail(lines)
+                                    }
+                                if (session.phase == Phase.MOVES)
+                                    trace(
+                                        "ordinaryMoves=${if(value==null)"not located" else "detected"}"
+                                    )
                                 done(value, lines)
                             } catch (e: RuntimeException) {
                                 suspendScan("Observation failed: ${e.javaClass.simpleName}")
@@ -419,70 +501,140 @@ class GameScanner : AccessibilityService() {
         }
     }
 
-    private fun retryScene(reason:String){
+    private fun retryScene(reason: String) {
         reject(reason)
-        if(follow && session.phase!=Phase.PAUSED)scheduleRead()
+        if (follow && session.phase != Phase.PAUSED) scheduleRead()
     }
 
-    private fun observeScene(first:Scene,second:Scene,token:Int){
+    private fun observeScene(first: Scene, second: Scene, token: Int) {
         trace("control=${second.kind} ${second.panel?.summary().orEmpty()}")
-        if(!first.same(second)){retryScene("Screen transition or target position disagreed");return}
-        if(closing && second.kind==NavKind.DETAILS){
-            closing=false;trace("appraisal dismissed; header identity verified");scheduleRead();return
-        }
-        if(second.kind==NavKind.APPRAISAL && !closing){
-            val a=first.panel;val b=second.panel
-            if(a==null || b==null || !a.agrees(b)){retryScene("Appraisal readings disagree or rail positions changed");return}
-            // Two reads can coincide with a pause in the filling animation. Require a
-            // third, later capture of the same card before committing any IV values.
-            busy=true;show("Checking stable appraisal bars")
-            handler.postDelayed({if(generation==token)frame(token){value,_->
-                busy=false
-                val c=(value as? Scene)?.panel
-                if(c==null || !b.agrees(c)){retryScene("Appraisal changed during stability check");return@frame}
-                appraisalSpecies=c.species?.takeIf{it.equals(b.species,true) && it.equals(a.species,true)}
-                trace("agreement=3/3 ${c.summary()}")
-                session.appraise(c.spread!!);closing=true
-                show("Verified ${c.spread}");if(follow)scheduleRead()
-            }},750)
+        if (!first.same(second)) {
+            retryScene("Screen transition or target position disagreed")
             return
         }
-        if(!follow){reject(second.reason.ifBlank{"Open or close appraisal manually, then Read"});return}
-        if(second.kind==NavKind.UNKNOWN){retryScene(second.reason);return}
-        val count=actionCounts[second.kind] ?: 0
-        if(count>=2){retryScene("Transition from ${second.kind} unverified; manual intervention required");return}
-        val semantic=when(second.kind){
-            NavKind.DETAILS_MENU->control("Pokémon menu")
-            NavKind.MENU_APPRAISE->control("Appraise")
-            NavKind.APPRAISAL->if(closing)control("Close appraisal") else null
-            else->null
+        if (closing && second.kind == NavKind.DETAILS) {
+            closing = false
+            trace("appraisal dismissed; header identity verified")
+            scheduleRead()
+            return
         }
-        actionCounts[second.kind]=count+1
-        if(semantic?.performAction(AccessibilityNodeInfo.ACTION_CLICK)==true){
-            trace("semantic action=${second.kind}");scheduleRead();return
+        if (second.kind == NavKind.APPRAISAL && !closing) {
+            val a = first.panel
+            val b = second.panel
+            if (a == null || b == null || !a.agrees(b)) {
+                retryScene("Appraisal readings disagree or rail positions changed")
+                return
+            }
+            // Two reads can coincide with a pause in the filling animation. Require a
+            // third, later capture of the same card before committing any IV values.
+            busy = true
+            show("Checking stable appraisal bars")
+            handler.postDelayed(
+                {
+                    if (generation == token)
+                        frame(token) { value, _ ->
+                            busy = false
+                            val c = (value as? Scene)?.panel
+                            if (c == null || !b.agrees(c)) {
+                                retryScene("Appraisal changed during stability check")
+                                return@frame
+                            }
+                            appraisalSpecies =
+                                c.species?.takeIf {
+                                    it.equals(b.species, true) && it.equals(a.species, true)
+                                }
+                            trace("agreement=3/3 ${c.summary()}")
+                            session.appraise(c.spread!!)
+                            closing = true
+                            show("Verified ${c.spread}")
+                            if (follow) scheduleRead()
+                        }
+                },
+                750,
+            )
+            return
         }
-        if(second.target==null || !tapVerified(second.target,token)){
-            retryScene("No verified, unobstructed ${second.kind} control");return
+        if (!follow) {
+            reject(second.reason.ifBlank { "Open or close appraisal manually, then Read" })
+            return
+        }
+        if (second.kind == NavKind.UNKNOWN) {
+            retryScene(second.reason)
+            return
+        }
+        if (
+            closing &&
+                second.kind == NavKind.APPRAISAL &&
+                (first.panel?.let { a ->
+                    second.panel?.let { a.agrees(it) && it.spread == session.spread }
+                } != true)
+        ) {
+            retryScene("Card changed before dismissal")
+            return
+        }
+        val count = actionCounts[second.kind] ?: 0
+        if (count >= 2) {
+            retryScene("Transition from ${second.kind} unverified; manual intervention required")
+            return
+        }
+        val semantic =
+            when (second.kind) {
+                NavKind.DETAILS_MENU -> control("Pokémon menu")
+                NavKind.MENU_APPRAISE -> control("Appraise")
+                NavKind.APPRAISAL -> if (closing) control("Close appraisal") else null
+                else -> null
+            }
+        actionCounts[second.kind] = count + 1
+        if (semantic?.performAction(AccessibilityNodeInfo.ACTION_CLICK) == true) {
+            trace("semantic action=${second.kind}")
+            scheduleRead()
+            return
+        }
+        if (second.target == null || !tapVerified(second.target, token)) {
+            retryScene("No verified, unobstructed ${second.kind} control")
+            return
         }
         trace("visual action=${second.kind} attempt=${count+1}")
     }
 
-    private fun tapVerified(target:Target,token:Int):Boolean{
-        val root=window() ?: return false
-        val wins=windows
-        val gameWin=wins.singleOrNull{it.id==root.windowId && it.isActive} ?: return false
-        val bounds=Rect().also{gameWin.getBoundsInScreen(it)}
-        if(bounds.width()!=target.width || bounds.height()!=target.height)return false
-        val x=bounds.left+target.x;val y=bounds.top+target.y
-        if(!bounds.contains(x,y) || wins.any{w->w.layer>gameWin.layer && Rect().also{w.getBoundsInScreen(it)}.contains(x,y)})return false
-        val path=Path().apply{moveTo(x.toFloat(),y.toFloat())}
-        busy=true
-        val sent=dispatchGesture(GestureDescription.Builder().addStroke(GestureDescription.StrokeDescription(path,0,65)).build(),
-            object:GestureResultCallback(){
-                override fun onCompleted(gesture:GestureDescription){if(token==generation){busy=false;scheduleRead()}}
-                override fun onCancelled(gesture:GestureDescription){if(token==generation)suspendScan("Verified tap interrupted")}
-            },handler)
-        if(!sent)busy=false
+    private fun tapVerified(target: Target, token: Int): Boolean {
+        val root = window() ?: return false
+        val wins = windows
+        val gameWin = wins.singleOrNull { it.id == root.windowId && it.isActive } ?: return false
+        val bounds = Rect().also { gameWin.getBoundsInScreen(it) }
+        if (bounds.width() != target.width || bounds.height() != target.height) return false
+        val x = bounds.left + target.x
+        val y = bounds.top + target.y
+        if (
+            !bounds.contains(x, y) ||
+                wins.any { w ->
+                    w.layer > gameWin.layer &&
+                        Rect().also { w.getBoundsInScreen(it) }.contains(x, y)
+                }
+        )
+            return false
+        val path = Path().apply { moveTo(x.toFloat(), y.toFloat()) }
+        busy = true
+        val sent =
+            dispatchGesture(
+                GestureDescription.Builder()
+                    .addStroke(GestureDescription.StrokeDescription(path, 0, 65))
+                    .build(),
+                object : GestureResultCallback() {
+                    override fun onCompleted(gesture: GestureDescription) {
+                        if (token == generation) {
+                            busy = false
+                            scheduleRead()
+                        }
+                    }
+
+                    override fun onCancelled(gesture: GestureDescription) {
+                        if (token == generation) suspendScan("Verified tap interrupted")
+                    }
+                },
+                handler,
+            )
+        if (!sent) busy = false
         return sent
     }
 
@@ -528,7 +680,9 @@ class GameScanner : AccessibilityService() {
     private fun followControls() {
         if (!follow || window() == null || busy || session.failures > 0 || review != null) return
         when (session.phase) {
-            Phase.APPRAISAL,Phase.MOVES,Phase.REVIEW -> scheduleRead()
+            Phase.APPRAISAL,
+            Phase.MOVES,
+            Phase.REVIEW -> scheduleRead()
             Phase.NEXT -> if (rename == Rename.NONE && !nextRequested) requestNext()
             else -> Unit
         }
@@ -576,7 +730,7 @@ class GameScanner : AccessibilityService() {
                     lineTo(bounds.left + bounds.width() * 0.22f, y)
                 } else {
                     moveTo(x, (if (back) top else bottom).toFloat())
-                    lineTo(x, (if (back) bottom else top).toFloat())
+                    lineTo(x, (if (back) bottom else (bottom + top) / 2).toFloat())
                 }
             }
         val gesture =
@@ -607,6 +761,21 @@ class GameScanner : AccessibilityService() {
         return started
     }
 
+    private fun verifiedReturn(first: List<Line>, lines: List<Line>): Boolean {
+        val signature = lines.joinToString("|") { it.text + "@" + it.top / 12 }
+        if (signature == lastReturn || first.map { it.text } != lines.map { it.text }) return false
+        val page = MoveViewport.read(lines)
+        val known =
+            page.header ||
+                Recognition.moves(lines) != null ||
+                page.rows.any { it in observedRows } ||
+                listOf("Power Up", "Stardust", "Evolve").count { label ->
+                    lines.any { it.text.equals(label, true) }
+                } >= 2
+        if (known) lastReturn = signature
+        return known
+    }
+
     private fun tryScroll(lines: List<Line>) {
         trace("ordinary moves seek")
         val fingerprint = lines.joinToString("|") { it.text }
@@ -616,12 +785,16 @@ class GameScanner : AccessibilityService() {
         val recognizedSection =
             sectionLabels.count { label -> lines.any { it.text.equals(label, true) } } >= 2
         if (
-            (detail != null && detail != session.details) || (detail == null && !recognizedSection)
+            (detail != null && detail != session.details) ||
+                (detail == null &&
+                    !recognizedSection &&
+                    !MoveViewport.read(lines).header &&
+                    MoveViewport.read(lines).rows.none { it in observedRows })
         ) {
             reject("Detail page unverified. Show the regular attacks.")
             return
         }
-        if (scrolls >= 3 || fingerprint == lastScroll) {
+        if (scrolls >= 5 || fingerprint == lastScroll) {
             reject("Scroll limit or unchanged page. Review moves manually.")
             return
         }
@@ -649,8 +822,16 @@ class GameScanner : AccessibilityService() {
             Phase.DETAILS,
             Phase.NEXT -> {
                 session.detail(value as Detail)
-                if(session.phase!=Phase.APPRAISAL){suspendScan("End or repeated identity; no further advance");return}
-                draftStored=false;closing=false;appraisalSpecies=null;actionCounts.clear()
+                if (session.phase != Phase.APPRAISAL) {
+                    suspendScan("End or repeated identity; no further advance")
+                    return
+                }
+                observedRows = emptyList()
+                lastReturn = ""
+                draftStored = false
+                closing = false
+                appraisalSpecies = null
+                actionCounts.clear()
                 scrolls = 0
                 returnScrolls = 0
                 lastScroll = ""
@@ -661,8 +842,13 @@ class GameScanner : AccessibilityService() {
             }
             Phase.APPRAISAL -> session.appraise(value as Spread)
             Phase.MOVES -> {
-                val moves=value as Attacks
-                if(!moves.complete && follow){reject("Ordinary moves visible; last slot boundary missing. Reveal New Attack or the end of the regular table.");return}
+                val moves = value as Attacks
+                if (!moves.complete && follow) {
+                    reject(
+                        "Ordinary moves visible; last slot boundary missing. Reveal New Attack or the end of the regular table."
+                    )
+                    return
+                }
                 session.moves(moves)
             }
             Phase.REVIEW -> {
@@ -670,9 +856,17 @@ class GameScanner : AccessibilityService() {
                     suspendScan("Details changed before save")
                     return
                 }
-                if(follow && mode=="Scan only" && session.spread!=null && (!session.scanMoves || session.attacks?.complete==true)){
-                    approvedSpecies=session.details?.visible?.species ?: appraisalSpecies
-                    if(approvedSpecies!=null){save(automatic=true);return}
+                if (
+                    follow &&
+                        mode == "Scan only" &&
+                        session.spread != null &&
+                        (!session.scanMoves || session.attacks?.complete == true)
+                ) {
+                    approvedSpecies = session.details?.visible?.species ?: appraisalSpecies
+                    if (approvedSpecies != null) {
+                        save(automatic = true)
+                        return
+                    }
                 }
                 if (approvedSpecies == null) review(value as Detail) else save()
                 return
@@ -743,18 +937,18 @@ class GameScanner : AccessibilityService() {
         }
     }
 
-    private fun savePartial(){
-        val d=session.details ?: return
-        if(session.phase!=Phase.PAUSED || draftStored || insertionPending)return
-        approvedSpecies=d.visible.species ?: "Unknown"
-        save(partial=true)
+    private fun savePartial() {
+        val d = session.details ?: return
+        if (session.phase != Phase.PAUSED || draftStored || insertionPending) return
+        approvedSpecies = d.visible.species ?: "Unknown"
+        save(partial = true)
     }
 
-    private fun save(partial:Boolean=false,automatic:Boolean=false) {
-        if(insertionPending || draftStored)return
+    private fun save(partial: Boolean = false, automatic: Boolean = false) {
+        if (insertionPending || draftStored) return
         val d = session.details ?: return
-        val s = session.spread.takeUnless{partial}
-        val a = session.attacks.takeUnless{partial}
+        val s = session.spread.takeUnless { partial }
+        val a = session.attacks.takeUnless { partial }
         val species = approvedSpecies ?: return
         val record =
             Specimen(
@@ -777,7 +971,10 @@ class GameScanner : AccessibilityService() {
                 second = a?.second.orEmpty(),
                 confidence =
                     "Identity 2/2; IVs ${if(s==null)"uncertain" else "2/2"}; moves ${if(a==null)"unconfirmed" else "2/2"}; species ${if(partial)"unconfirmed" else if(automatic)"from appraisal/header" else "user-reviewed"}",
-                verification = if(partial || s==null || (session.scanMoves && a?.complete!=true))"Incomplete" else if(automatic)"Scan verified" else "Scan reviewed",
+                verification =
+                    if (partial || s == null || (session.scanMoves && a?.complete != true))
+                        "Incomplete"
+                    else if (automatic) "Scan verified" else "Scan reviewed",
                 notes = if (a?.complete == true) "" else "Move slots unconfirmed",
             )
         val prefs = getSharedPreferences("settings", 0)
@@ -787,20 +984,30 @@ class GameScanner : AccessibilityService() {
         proposed = runCatching { Naming.preview(record, template) }.getOrDefault("")
         val token = generation
         busy = true
-        insertionPending=true;show("Saving observation")
+        insertionPending = true
+        show("Saving observation")
         io.execute {
             val result = runCatching { Store.open(this).catalog().add(record) }
             handler.post {
-                if(token!=generation && session.details===d){insertionPending=false;if(result.isSuccess)draftStored=true;show("Check local record before resuming")}
+                if (token != generation && session.details === d) {
+                    insertionPending = false
+                    if (result.isSuccess) draftStored = true
+                    show("Check local record before resuming")
+                }
                 if (token == generation) {
-                    insertionPending=false
+                    insertionPending = false
                     busy = false
                     trace("save=${if(result.isSuccess)"ok" else "failed"} partial=$partial")
                     if (result.isFailure) reject("Local save failed")
                     else {
-                        draftStored=true;storedId = result.getOrThrow()
+                        draftStored = true
+                        storedId = result.getOrThrow()
                         log("Saved record #$storedId")
-                        if(partial){finishSession();return@post};session.saved()
+                        if (partial) {
+                            finishSession()
+                            return@post
+                        }
+                        session.saved()
                         original = d
                         if (
                             RenamePolicy.eligible(

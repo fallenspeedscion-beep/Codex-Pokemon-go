@@ -87,7 +87,7 @@ object Recognition {
         return Detail(name, power, maximum, visible)
     }
 
-    fun bars(lines: List<Line>, image: Pixels) = Appraisal.read(lines,image).spread
+    fun bars(lines: List<Line>, image: Pixels) = Appraisal.read(lines, image).spread
 
     // Only accept labelled slots. Layouts lacking labels stay pending for human review.
     fun moves(lines: List<Line>): Attacks? {
@@ -100,7 +100,7 @@ object Recognition {
                     !it.contains("Attack", true)
             }
         }
-        val fast = slot("Fast Attack") ?: return moveTable(regular)
+        val fast = slot("Fast Attack") ?: return moveTable(lines)
         val charged = slot("Charged Attack") ?: slot("Charged Attack 1") ?: return null
         val second = slot("Charged Attack 2")
         return Attacks(
@@ -114,34 +114,10 @@ object Recognition {
     // Attack names sit to the left of damage in the battle tab. Keep uncertain
     // slot counts open until the lower boundary of the regular table is visible.
     private fun moveTable(lines: List<Line>): Attacks? {
-        val tab =
-            lines.indexOfLast {
-                it.text.equals("Trainer Battles", true) || it.text.equals("Gyms & Raids", true)
-            }
-        if (tab < 0) return null
-        val body = lines.drop(tab + 1).takeWhile { !it.text.equals("New Attack", true) }
-        val namePattern = Regex("""[A-Za-z][A-Za-z '’-]{1,32}""")
-        val joined = Regex("""^([A-Za-z][A-Za-z '’-]{1,32}?)\s+(\d{1,3})$""")
-        val names =
-            body.mapNotNull { line ->
-                joined.matchEntire(line.text)?.groupValues?.get(1)
-                    ?: line.text.takeIf {
-                        namePattern.matches(it) &&
-                            body.count { n ->
-                                n.left > line.right &&
-                                    n.text.matches(Regex("""\d{1,3}""")) &&
-                                    kotlin.math.abs((n.top + n.bottom) - (line.top + line.bottom)) <
-                                        line.bottom - line.top
-                            } == 1
-                    }
-            }
+        val page = MoveViewport.read(lines)
+        val names = page.extend(emptyList()) ?: return null
         if (names.size !in 2..3 || names.distinct().size != names.size) return null
-        return Attacks(
-            names[0],
-            names[1],
-            names.getOrNull(2),
-            names.size == 3 || lines.any { it.text.equals("New Attack", true) },
-        )
+        return Attacks(names[0], names[1], names.getOrNull(2), names.size == 3 || page.end)
     }
 }
 

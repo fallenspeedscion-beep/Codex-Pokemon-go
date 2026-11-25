@@ -71,8 +71,10 @@ interface Catalog {
     @Query("SELECT * FROM ScanEntry WHERE profileId=:profile ORDER BY id DESC LIMIT 20")
     fun history(profile: Long): List<ScanEntry>
 
-    @Query("SELECT * FROM ScanEntry WHERE profileId=:profile AND message LIKE 'PPM2 %' ORDER BY id DESC LIMIT 2000")
-    fun diagnostics(profile:Long):List<ScanEntry>
+    @Query(
+        "SELECT * FROM ScanEntry WHERE profileId=:profile AND message LIKE 'PPM2 %' ORDER BY id DESC LIMIT 2000"
+    )
+    fun diagnostics(profile: Long): List<ScanEntry>
 
     @Insert fun log(entry: ScanEntry)
 

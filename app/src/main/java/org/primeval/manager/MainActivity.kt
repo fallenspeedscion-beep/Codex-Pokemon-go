@@ -485,13 +485,37 @@ class MainActivity : Activity() {
             }
         body.addView(moves)
         val follow =
-            CheckBox(this).apply { text = "Automatically open appraisal, scroll and advance"; isChecked=true }
+            CheckBox(this).apply {
+                text = "Automatically open appraisal, scroll and advance"
+                isChecked = true
+            }
         body.addView(follow)
-        val diagnostic=CheckBox(this).apply{text="Record redacted scanner diagnostics";isChecked=prefs.getBoolean("diagnostic",false)}
+        val diagnostic =
+            CheckBox(this).apply {
+                text = "Record redacted scanner diagnostics"
+                isChecked = prefs.getBoolean("diagnostic", false)
+            }
         body.addView(diagnostic)
-        diagnostic.setOnCheckedChangeListener{_,on->prefs.edit().putBoolean("diagnostic",on).apply()}
-        btn(body,"Export diagnostic log"){startActivityForResult(Intent(Intent.ACTION_CREATE_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("text/plain").putExtra(Intent.EXTRA_TITLE,"primeval-scan.txt"),14)}
-        btn(body,"Analyse appraisal screenshot"){startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("image/*"),15)}
+        diagnostic.setOnCheckedChangeListener { _, on ->
+            prefs.edit().putBoolean("diagnostic", on).apply()
+        }
+        btn(body, "Export diagnostic log") {
+            startActivityForResult(
+                Intent(Intent.ACTION_CREATE_DOCUMENT)
+                    .addCategory(Intent.CATEGORY_OPENABLE)
+                    .setType("text/plain")
+                    .putExtra(Intent.EXTRA_TITLE, "primeval-scan.txt"),
+                14,
+            )
+        }
+        btn(body, "Analyse appraisal screenshot") {
+            startActivityForResult(
+                Intent(Intent.ACTION_OPEN_DOCUMENT)
+                    .addCategory(Intent.CATEGORY_OPENABLE)
+                    .setType("image/*"),
+                15,
+            )
+        }
         label(
             body,
             "The optional accessibility service reads the game window and can swipe verified detail pages. Automatic mode also operates uniquely labelled rename controls. You can pause or stop from its panel.",
@@ -512,7 +536,14 @@ class MainActivity : Activity() {
             val p = profiles.first { it.id == profile }
             val m = mode.selectedItem.toString()
             fun begin() {
-                service.start(p.id, p.name, m, moves.isChecked, follow.isChecked, diagnostic.isChecked)
+                service.start(
+                    p.id,
+                    p.name,
+                    m,
+                    moves.isChecked,
+                    follow.isChecked,
+                    diagnostic.isChecked,
+                )
                 moveTaskToBack(true)
             }
             if (m == "Automatic")
@@ -691,14 +722,30 @@ class MainActivity : Activity() {
         val uri = data?.data ?: return
         if (resultCode != RESULT_OK) return
         when (requestCode) {
-            14 -> {val id=profile
-                work({val rows=store.catalog().diagnostics(id).asReversed()
-                    contentResolver.openOutputStream(uri,"wt")?.bufferedWriter()?.use{out->rows.forEach{out.appendLine("${it.time} ${it.message}")}} ?: error("Cannot write file")
-                }){toast("Diagnostic log saved")}
+            14 -> {
+                val id = profile
+                work({
+                    val rows = store.catalog().diagnostics(id).asReversed()
+                    contentResolver.openOutputStream(uri, "wt")?.bufferedWriter()?.use { out ->
+                        rows.forEach { out.appendLine("${it.time} ${it.message}") }
+                    } ?: error("Cannot write file")
+                }) {
+                    toast("Diagnostic log saved")
+                }
             }
-            15 -> work({ReferenceReplay.read{contentResolver.openInputStream(uri) ?: error("Cannot open image")}.summary()}){
-                AlertDialog.Builder(this).setTitle("Single screenshot · unverified").setMessage(it).setPositiveButton("Close",null).show()
-            }
+            15 ->
+                work({
+                    ReferenceReplay.read {
+                            contentResolver.openInputStream(uri) ?: error("Cannot open image")
+                        }
+                        .summary()
+                }) {
+                    AlertDialog.Builder(this)
+                        .setTitle("Single screenshot · unverified")
+                        .setMessage(it)
+                        .setPositiveButton("Close", null)
+                        .show()
+                }
             10 -> {
                 val ids = exportIds.toSet()
                 val json = exportJson

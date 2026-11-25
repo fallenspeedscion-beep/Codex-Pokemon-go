@@ -1,5 +1,6 @@
 package org.primeval.manager
 
+import android.util.Log
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import org.junit.Assert.assertEquals
@@ -21,6 +22,7 @@ class ReferenceFixtureTest {
         for (row in rows) {
             val (file, a, d, h) = row.split('\t')
             val measured = ReferenceReplay.read { assets.open(file) }
+            Log.i("PrimevalFixture", measured.summary())
             assertEquals(
                 measured.summary(),
                 Spread(a.toInt(), d.toInt(), h.toInt()),

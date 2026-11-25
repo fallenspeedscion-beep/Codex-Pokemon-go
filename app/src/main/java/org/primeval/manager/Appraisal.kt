@@ -82,6 +82,8 @@ object Appraisal {
         val b = rgb and 255
         return when {
             minOf(r, g, b) >= 244 -> 0 // card and separator
+            // JPEG chroma bleed from a rose bar can tint its narrow white dividers.
+            r >= 248 && g >= 208 && b >= 196 && abs(g - b) <= 18 -> 0
             r in 145..240 && maxOf(r, g, b) - minOf(r, g, b) <= 16 -> 1 // empty rail
             r >= 160 && r - g >= 28 && r - b >= 40 && g >= 55 -> 2 // orange or rose
             else -> -1
@@ -99,7 +101,17 @@ object Appraisal {
                 continue
             }
             val start = x
-            while (x < limit && colors[x] > 0) x++
+            while (x < limit && colors[x] > 0) {
+                x++
+                if (colors[x - 1] != 2 || x >= limit || colors[x] != -1) continue
+                var next = x
+                while (
+                    next < limit && colors[next] == -1 && next - x < max(2, im.width / 140)
+                ) next++
+                // Keep a blended fill endpoint inside its segment. Measurement below
+                // bounds both possible fill lengths including all uncertain pixels.
+                if (next < limit && colors[next] == 1) x = next
+            }
             if (x - start >= im.width / 30) runs.add(start until x)
         }
         return runs.windowed(3).mapNotNull { segments ->
@@ -109,8 +121,6 @@ object Appraisal {
             if (width !in im.width / 6..im.width / 2 || first < 2 || last + 2 >= limit)
                 return@mapNotNull null
             if (colors[first - 2] != 0 || colors[last + 2] != 0) return@mapNotNull null
-            val lengths = segments.map { it.last - it.first + 1 }
-            if (lengths.min() * 1.16 < lengths.max()) return@mapNotNull null
             if (
                 segments.zipWithNext().any { (a, b) ->
                     val gap = b.first - a.last - 1
@@ -119,27 +129,7 @@ object Appraisal {
                 }
             )
                 return@mapNotNull null
-            var fill = 0
-            var sawEmpty = false
-            var cells = 0
-            for (seg in segments) {
-                for (i in seg) {
-                    if (colors[i] == 2) {
-                        if (sawEmpty) return@mapNotNull null
-                        fill++
-                    } else sawEmpty = true
-                }
-                for (cell in 0..4) {
-                    val center = seg.first + ((cell + 0.5) * (seg.last - seg.first + 1) / 5).toInt()
-                    if (colors[center] == 2) cells++
-                }
-            }
-            val ratio = fill.toDouble() / lengths.sum()
-            val scaled = 15 * ratio
-            val iv = scaled.roundToInt()
-            val confidence = 1 - abs(scaled - iv)
-            if (cells != iv || confidence < 0.75) return@mapNotNull null
-            Rail(first, y, width, ratio, iv, confidence)
+            measure(colors, segments, 0, y)
         }
     }
 
@@ -167,31 +157,62 @@ object Appraisal {
         val two = divider(width * 2 / 3) ?: return null
         val segments =
             listOf(first until one.first, one.last + 1 until two.first, two.last + 1..last)
+        return measure(colors, segments, left, y)
+    }
+
+    private fun measure(colors: IntArray, segments: List<IntRange>, origin: Int, y: Int): Rail? {
+        val first = segments.first().first
+        val width = segments.last().last - first + 1
         val lengths = segments.map { it.last - it.first + 1 }
         if (lengths.min() * 1.16 < lengths.max()) return null
-        val samples = segments.flatMap { it.map(colors::get) }
-        val lastFill = samples.indexOfLast { it == 2 }
-        val firstEmpty = samples.indexOfFirst { it == 1 }.let { if (it < 0) samples.size else it }
-        val uncertain = firstEmpty - lastFill - 1
-        if (
-            uncertain !in 0..max(2, width / 65) ||
-                samples.take(lastFill + 1).any { it != 2 } ||
-                samples.drop(firstEmpty).any { it != 1 }
-        )
-            return null
-        val low = 15.0 * (lastFill + 1) / samples.size
-        val high = 15.0 * firstEmpty / samples.size
+        var filled = 0
+        var empty = 0
+        var uncertain = 0
+        // Material must progress from fill through a narrow transition to empty.
+        for (segment in segments) for (x in segment) {
+            when (colors[x]) {
+                2 -> if (empty == 0 && uncertain == 0) filled++ else return null
+                1 -> empty++
+                else -> if (empty == 0) uncertain++ else return null
+            }
+        }
+        if (uncertain > max(2, width / 65)) return null
+        val count = lengths.sum()
+        val low = 15.0 * filled / count
+        val high = 15.0 * (filled + uncertain) / count
         val iv = low.roundToInt()
         val confidence = 1 - max(abs(low - iv), abs(high - iv))
         if (iv != high.roundToInt() || confidence < 0.75) return null
-        val centers =
-            segments.flatMap { range ->
-                (0..4).map { k ->
-                    colors[range.first + ((k + 0.5) * (range.last - range.first + 1) / 5).toInt()]
-                }
+        for ((index, range) in segments.withIndex()) for (k in 0..4) {
+            val center = range.first + ((k + 0.5) * lengths[index] / 5).toInt()
+            val expected = if (index * 5 + k < iv) 2 else 1
+            if (colors[center] != expected) return null
+        }
+        return Rail(origin + first, y, width, (low + high) / 30, iv, confidence)
+    }
+
+    // When OCR misses the appraisal text, require the same two visible card edges
+    // on every stat row. Isolated bars on an unbounded white screen are ambiguous.
+    private fun boundedCard(im: Pixels, panel: List<Rail>): Boolean {
+        fun edge(row: Rail, direction: Int): Int? {
+            val cap = if (direction < 0) row.left else row.left + row.width - 1
+            val start = max(3, row.width / 32)
+            fun white(x: Int): Boolean {
+                val c = im.rgb(x, row.y)
+                return minOf(c shr 16 and 255, c shr 8 and 255, c and 255) >= 240
             }
-        if (centers.take(iv).any { it != 2 } || centers.drop(iv).any { it != 1 }) return null
-        return Rail(left + first, y, last - first + 1, (low + high) / 30, iv, confidence)
+            for (offset in start..row.width / 4) {
+                val x = cap + direction * offset
+                val outside = x + direction * 3
+                if (x !in 0 until im.width || outside !in 0 until im.width) return null
+                if (!white(x)) return x.takeIf { offset > start && !white(outside) }
+            }
+            return null
+        }
+        return listOf(-1, 1).all { direction ->
+            val edges = panel.map { edge(it, direction) ?: return false }
+            edges.max() - edges.min() <= max(2, panel.first().width / 40)
+        }
     }
 
     private val labels = listOf("Attack", "Defense", "HP")
@@ -203,18 +224,20 @@ object Appraisal {
                 lines.filter { it.text.trim().equals(label, true) && it.left < im.width / 2 }
             }
         val all = anchors.flatten()
-        if (anchors.count { it.isNotEmpty() } < 2 && species == null)
-            return PanelRead(emptyList(), "appraisal anchors missing")
+        val needsCardEdges = anchors.count { it.isNotEmpty() } < 2 && species == null
         val start =
-            if (all.isEmpty()) im.height / 2 else max(0, all.minOf { it.top } - im.width / 6)
+            if (all.isEmpty() || needsCardEdges) im.height / 2
+            else max(0, all.minOf { it.top } - im.width / 6)
         val end =
-            if (all.isEmpty()) im.height else min(im.height, all.maxOf { it.bottom } + im.width / 4)
+            if (all.isEmpty() || needsCardEdges) im.height
+            else min(im.height, all.maxOf { it.bottom } + im.width / 4)
         val step = max(1, im.width / 500)
         val groups = mutableListOf<MutableList<Rail>>()
         for (y in start until end step step) for (row in trace(im, y)) {
             val group =
                 groups.lastOrNull { g ->
-                    y - g.last().y <= 2 * step &&
+                    y - g.last().y in 1..2 * step &&
+                        abs(row.width - g.last().width) <= max(4, row.width / 24) &&
                         abs(row.left - g.last().left) <= max(3, row.width / 25)
                 }
             if (group == null) groups.add(mutableListOf(row)) else group.add(row)
@@ -268,6 +291,7 @@ object Appraisal {
         }
         val measuredRows = (rows + byLabel.filterNotNull()).distinct()
         val panels = mutableListOf<List<Rail>>()
+        var unbounded = 0
         for (a in measuredRows) for (b in
             measuredRows.filter { it.y - a.y in a.width / 6..a.width / 2 }) for (c in
             measuredRows.filter { it.y > b.y }) {
@@ -291,13 +315,17 @@ object Appraisal {
                 }
             )
                 continue
+            if (needsCardEdges && !boundedCard(im, ordered)) {
+                unbounded++
+                continue
+            }
             panels.add(ordered)
         }
         val panel =
             panels.singleOrNull()
                 ?: return PanelRead(
                     emptyList(),
-                    "aligned card count=${panels.size}, candidate rails=${rows.size}$repairReason",
+                    "aligned card count=${panels.size}, candidate rails=${rows.size}, rejected card edges=$unbounded$repairReason",
                     rowEvidence = byLabel,
                 )
         // A textual rating is used only alongside the card. Badge art alone is ambiguous.

@@ -42,6 +42,7 @@ class DomainTest {
                         when {
                             labels.none { y in it.bottom + 2..it.bottom + 6 } || x !in 50..199 ->
                                 0xffffff
+                            x in 99..100 || x in 149..150 -> 0xffffff
                             x < 50 + 10 * v -> 0xef9940
                             else -> 0xcacaca
                         }

@@ -87,64 +87,7 @@ object Recognition {
         return Detail(name, power, maximum, visible)
     }
 
-    fun bars(lines: List<Line>, image: Pixels): Spread? {
-        val labels =
-            listOf("Attack", "Defense", "HP").map { label ->
-                lines.singleOrNull { it.text.trim().equals(label, true) } ?: return null
-            }
-        val gap = labels[1].top - labels[0].top
-        if (gap <= 0 || abs(labels[2].top - labels[1].top - gap) > gap / 4) return null
-        val values =
-            labels.map { l ->
-                val samples =
-                    (maxOf(0, l.bottom) until minOf(l.bottom + gap / 2, image.height)).mapNotNull {
-                        y ->
-                        bar(image, l.left, y)
-                    }
-                val value = samples.groupBy { it }.maxByOrNull { it.value.size } ?: return null
-                if (value.value.size < 2 || samples.any { it != value.key }) return null
-                value.key
-            }
-        return Spread(values[0], values[1], values[2])
-    }
-
-    private fun bar(im: Pixels, left: Int, y: Int): Int? {
-        fun color(x: Int): Int {
-            val p = im.rgb(x, y)
-            val r = p shr 16 and 255
-            val g = p shr 8 and 255
-            val b = p and 255
-            return when {
-                r > 185 && r - g > 24 && r - b > 65 -> 2
-                r in 165..239 && maxOf(r, g, b) - minOf(r, g, b) < 14 -> 1
-                else -> 0
-            }
-        }
-        val start =
-            (maxOf(0, left - im.width / 80)..minOf(im.width - 1, left + im.width / 60))
-                .firstOrNull { color(it) > 0 } ?: return null
-        var last = start
-        var fill = 0
-        var empty = false
-        for (x in start until im.width) {
-            when (color(x)) {
-                0 -> if (x - last > maxOf(2, im.width / 200)) break
-                1 -> {
-                    empty = true
-                    last = x
-                }
-                2 -> {
-                    if (empty) return null
-                    fill = x - start + 1
-                    last = x
-                }
-            }
-        }
-        val width = last - start + 1
-        if (width !in im.width / 7..im.width / 2) return null
-        val scaled = 15.0 * fill / width
-        return scaled.roundToInt().takeIf { abs(it - scaled) < 0.22 }
-    }
+    fun bars(lines: List<Line>, image: Pixels) = Appraisal.read(lines,image).spread
 
     // Only accept labelled slots. Layouts lacking labels stay pending for human review.
     fun moves(lines: List<Line>): Attacks? {

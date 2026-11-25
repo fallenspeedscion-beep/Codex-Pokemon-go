@@ -25,6 +25,7 @@ interface Catalog {
     @Query("SELECT * FROM Specimen ORDER BY scannedAt DESC,id DESC") fun all():List<Specimen>
     @Query("SELECT * FROM Specimen WHERE profileId=:profile ORDER BY scannedAt DESC,id DESC") fun records(profile:Long):List<Specimen>
     @Insert fun add(record:Specimen):Long
+    @Query("UPDATE Specimen SET nickname=:name, verification='Rename verified' WHERE id=:id") fun verifiedName(id:Long,name:String):Int
     @Update fun edit(record:Specimen)
     @Query("SELECT * FROM CalendarItem ORDER BY start") fun events():List<CalendarItem>
     @Query("DELETE FROM CalendarItem WHERE source=:source") fun clearSource(source:String)

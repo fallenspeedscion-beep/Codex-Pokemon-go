@@ -2,6 +2,8 @@ package org.primeval.manager
 
 import android.accessibilityservice.AccessibilityService
 import android.content.*
+import android.app.AlertDialog
+import java.lang.ref.WeakReference
 import android.graphics.*
 import android.os.*
 import android.view.*
@@ -15,7 +17,8 @@ import java.util.concurrent.Executors
 class GameScanner:AccessibilityService() {
     companion object {
         const val game="com.nianticlabs.pokemongo"
-        var active:GameScanner?=null; private set
+        private var reference=WeakReference<GameScanner>(null)
+        val active:GameScanner? get()=reference.get()
     }
     private val handler=Handler(Looper.getMainLooper())
     private val io=Executors.newSingleThreadExecutor()
@@ -33,19 +36,26 @@ class GameScanner:AccessibilityService() {
     private var scrolls=0
     private var lastScroll=""
     private var proposed=""
+    private var approvedSpecies:String?=null
+    private var customOverride=false
+    private var storedId=0L
+    private var review:AlertDialog?=null
+    private lateinit var option:Button
+    private var moveEvidence=""
+    private var nextRequested=false
     private var original:Detail?=null
     private enum class Rename { NONE, VERIFY, EDIT, CHECK }
     private var rename=Rename.NONE
-    override fun onServiceConnected(){active=this}
+    override fun onServiceConnected(){reference=WeakReference(this)}
     override fun onInterrupt(){suspendScan("Service interrupted")}
-    override fun onDestroy(){finishSession();active=null;reader.close();io.shutdown();super.onDestroy()}
+    override fun onDestroy(){finishSession();reference.clear();reader.close();io.shutdown();super.onDestroy()}
     override fun onAccessibilityEvent(event:AccessibilityEvent?) {
-        if(panel!=null && event?.eventType==AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED && rootInActiveWindow?.packageName?.toString()!=game && startedReading) suspendScan("Foreground changed. Recheck the current Pokémon.")
+        if(review==null && panel!=null && event?.eventType==AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED && rootInActiveWindow?.packageName?.toString()!=game && startedReading) suspendScan("Foreground changed. Recheck the current Pokémon.")
     }
     private var startedReading=false
-    private fun suspendScan(why:String){if(panel==null)return;generation++;busy=false;rename=Rename.NONE;session.pause(why);show(why)}
+    private fun suspendScan(why:String){if(panel==null)return;generation++;review?.dismiss();review=null;approvedSpecies=null;busy=false;rename=Rename.NONE;session.pause(why);show(why)}
     fun finishSession(){
-        generation++;busy=false;session.stop();rename=Rename.NONE
+        generation++;review?.dismiss();review=null;approvedSpecies=null;busy=false;session.stop();rename=Rename.NONE
         panel?.let{getSystemService(WindowManager::class.java).removeView(it)};panel=null;startedReading=false
     }
     fun start(id:Long,name:String,selectedMode:String,moves:Boolean){
@@ -57,6 +67,10 @@ class GameScanner:AccessibilityService() {
         read=button("Read"){captureStep()}
         pause=button("Pause"){if(session.phase==Phase.PAUSED){generation++;session.resume();show()}else suspendScan("Paused by user")}
         button("Stop"){finishSession()}
+        option=Button(this).apply{isAllCaps=false;box.addView(this);setOnClickListener{
+            if(session.phase==Phase.MOVES){session.keepUncertainMoves();show("Uncertain move evidence will be saved")}
+            else if(session.phase==Phase.NEXT && rename==Rename.NONE && !nextRequested){requestNext()}
+        }}
         val params=WindowManager.LayoutParams((resources.displayMetrics.widthPixels*.94).toInt(),-2,WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,PixelFormat.TRANSLUCENT)
         params.gravity=Gravity.TOP or Gravity.CENTER_HORIZONTAL
         getSystemService(WindowManager::class.java).addView(box,params);panel=box;show()
@@ -70,14 +84,16 @@ class GameScanner:AccessibilityService() {
                 Phase.DETAILS->"Open first details in #Appraise, then Read."
                 Phase.APPRAISAL->"Open appraisal for this same Pokémon, then Read."
                 Phase.MOVES->"Close appraisal and show regular attacks, then Read."
-                Phase.REVIEW->"Return to the same details. Confirm the displayed name is its species, then save. Stop for a custom name."
+                Phase.REVIEW->"Return to the same details. Review species, appraisal and moves before saving."
                 Phase.NEXT->"Open the next filtered Pokémon and Read, or Stop at the end."
                 Phase.PAUSED->"Resume starts a fresh identity check."
                 Phase.STOPPED->"Stopped"
             }
         }
         title.text="$profileName · $mode\n$prompt\n$message".trimEnd()
-        read.text=if(session.phase==Phase.REVIEW)"Save" else "Read"
+        read.text=if(session.phase==Phase.REVIEW)"Review" else "Read"
+        option.visibility=if(!busy && rename==Rename.NONE && (session.phase==Phase.MOVES && session.failures>0 || session.phase==Phase.NEXT && !nextRequested))View.VISIBLE else View.GONE
+        option.text=if(session.phase==Phase.NEXT)"Advance using labelled Next control" else "Keep move reading as uncertain"
         read.isEnabled=!busy && session.phase!=Phase.PAUSED
         pause.text=if(session.phase==Phase.PAUSED)"Resume" else "Pause"
     }
@@ -134,7 +150,17 @@ class GameScanner:AccessibilityService() {
         return result.filter{it.isVisibleToUser && it.isEnabled && it.packageName?.toString()==game}
     }
     private fun control(label:String)=nodes().singleOrNull{it.isClickable && (it.contentDescription?.toString().equals(label,true) || it.text?.toString().equals(label,true))}
+    private fun requestNext(){
+        val token=++generation;busy=true;show("Checking before advance")
+        frame(token){value,_->if(value!=original || value==null){suspendScan("Current page changed before advance");return@frame}
+            nextRequested=true
+            val clicked=control("Next Pokémon")?.performAction(AccessibilityNodeInfo.ACTION_CLICK)==true
+            busy=false;show(if(clicked)"Checking next details…" else "No unique Next Pokémon control. Advance manually or stop.")
+            if(clicked)handler.postDelayed({if(generation==token && session.phase==Phase.NEXT)captureStep()},750)
+        }
+    }
     private fun tryScroll(lines:List<Line>){
+        moveEvidence=lines.joinToString(" | "){it.text}.take(750)
         val fingerprint=lines.joinToString("|"){it.text}
         val scroll=nodes().singleOrNull{it.isScrollable}
         if(scrolls>=3 || fingerprint==lastScroll || scroll==null || !scroll.performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD)){
@@ -145,21 +171,45 @@ class GameScanner:AccessibilityService() {
     private fun accept(value:Any){
         if(rename!=Rename.NONE){verifyRename(value as? Detail);return}
         when(session.phase){
-            Phase.DETAILS,Phase.NEXT->{session.detail(value as Detail);scrolls=0;lastScroll=""}
+            Phase.DETAILS,Phase.NEXT->{session.detail(value as Detail);scrolls=0;lastScroll="";moveEvidence="";approvedSpecies=null;customOverride=false;nextRequested=false}
             Phase.APPRAISAL->session.appraise(value as Spread)
             Phase.MOVES->session.moves(value as Attacks)
-            Phase.REVIEW->{if(value!=session.details){suspendScan("Details changed before save");return};save();return}
+            Phase.REVIEW->{if(value!=session.details){suspendScan("Details changed before save");return};if(approvedSpecies==null)review(value as Detail) else save();return}
             else->return
         }
         show(if(session.failures>0)session.reason else value.toString())
     }
+    private fun review(detail:Detail){
+        val s=session.spread ?: return
+        val content=LinearLayout(this).apply{orientation=LinearLayout.VERTICAL;setPadding(32,12,32,12)}
+        fun caption(value:String){content.addView(TextView(this).apply{text=value})}
+        caption("Current name: ${detail.name} · CP ${detail.cp} · HP ${detail.hp}")
+        caption("Attack ${s.attack}   Defense ${s.defense}   Stamina ${s.stamina}")
+        caption(session.attacks?.let{listOfNotNull(it.fast,it.charged,it.second).joinToString(" / ")} ?: "Moves unconfirmed")
+        caption("Confirm species. Enter the actual species for a custom nickname.")
+        val species=EditText(this).apply{setSingleLine();setText(detail.visible.species ?: detail.name);content.addView(this)}
+        val override=CheckBox(this).apply{text="Allow replacing this Pokémon’s custom nickname";if(mode=="Automatic")content.addView(this)}
+        val dialog=AlertDialog.Builder(this,android.R.style.Theme_Material_Light_Dialog_Alert).setTitle("Review scan · $profileName").setView(content)
+            .setNegativeButton("Cancel",null).setPositiveButton("Confirm",null).create()
+        dialog.window?.setType(WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY)
+        dialog.setOnDismissListener{review=null}
+        review=dialog;dialog.show()
+        dialog.getButton(-1).setOnClickListener{
+            val name=species.text.toString().trim()
+            if(name.isBlank()){species.error="Enter species";return@setOnClickListener}
+            approvedSpecies=name;customOverride=override.isChecked;dialog.dismiss()
+            val token=generation
+            handler.postDelayed({if(token==generation && session.phase==Phase.REVIEW)captureStep()},600)
+        }
+    }
     private fun save(){
         val d=session.details ?: return;val s=session.spread ?: return;val a=session.attacks
-        val record=Specimen(profileId=profile,species=d.name,nickname=d.name,cp=d.cp,hp=d.hp,attack=s.attack,defense=s.defense,stamina=s.stamina,
+        val species=approvedSpecies ?: return
+        val record=Specimen(profileId=profile,species=species,nickname=d.name,form=d.visible.form.orEmpty(),shiny=d.visible.shiny,shadow=d.visible.shadow,purified=d.visible.purified,lucky=d.visible.lucky,maxStatus=d.visible.maxStatus,cp=d.cp,hp=d.hp,attack=s.attack,defense=s.defense,stamina=s.stamina,
             fast=a?.fast.orEmpty(),charged=a?.charged.orEmpty(),second=a?.second.orEmpty(),
-            confidence="Two matching frames per step; manual species confirmation",verification="Scan reviewed",notes=if(a?.complete==true)"" else "Move slots unconfirmed")
+            confidence="Two matching frames per step; manual species confirmation",verification="Scan reviewed",notes=if(a?.complete==true)"" else "Move slots unconfirmed. $moveEvidence")
         val prefs=getSharedPreferences("settings",0)
-        val template=prefs.getString("template."+d.name.lowercase(),null) ?: prefs.getString("template",Naming.default)!!
+        val template=prefs.getString("template."+species.lowercase(),null) ?: prefs.getString("template",Naming.default)!!
         proposed=runCatching{Naming.preview(record,template)}.getOrDefault("")
         val token=generation;busy=true;show("Saving observation")
         io.execute{
@@ -167,8 +217,8 @@ class GameScanner:AccessibilityService() {
             handler.post{if(token==generation){
                 busy=false
                 if(result.isFailure)reject("Local save failed") else {
-                    session.saved();original=d
-                    if(mode=="Automatic" && proposed.isNotBlank() && proposed!=d.name)rename=Rename.VERIFY
+                    storedId=result.getOrThrow();session.saved();original=d
+                    if(mode=="Automatic" && (!Naming.protected(record) || customOverride) && proposed.isNotBlank() && proposed!=d.name)rename=Rename.VERIFY
                     if(mode=="Assisted" && proposed.isNotBlank())getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText("Nickname",proposed))
                     show("Saved #${result.getOrNull()}"+if(mode!="Scan only")" · $proposed" else "")
                 }
@@ -183,7 +233,11 @@ class GameScanner:AccessibilityService() {
                 rename=Rename.EDIT;show()
             }
             Rename.CHECK->{if(detail!=old.copy(name=proposed)){suspendScan("Rename outcome uncertain. Inspect manually.");return}
-                rename=Rename.NONE;session.detailAfterRename(detail);show("Verified $proposed")}
+                rename=Rename.NONE;session.detailAfterRename(detail);original=detail
+                val id=storedId;val name=proposed;val token=generation
+                busy=true;show("Recording verified name")
+                io.execute{val result=runCatching{Store.open(this).catalog().verifiedName(id,name)}
+                    handler.post{if(generation==token){busy=false;if(result.getOrNull()==1)show("Verified $name") else suspendScan("Game rename verified. Local record update failed.")}}}}
             else->suspendScan("Unexpected rename state")
         }
     }

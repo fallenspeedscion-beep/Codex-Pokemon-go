@@ -95,19 +95,21 @@ class Session(val scanMoves:Boolean) {
     var details:Detail?=null;private set
     var spread:Spread?=null;private set
     var attacks:Attacks?=null;private set
-    private var prior:Detail?=null
+    private val visited=mutableSetOf<Triple<String,Int,Int>>()
+    private fun key(detail:Detail)=Triple(detail.name,detail.cp,detail.hp)
     var reason="";private set
     fun fail(message:String){reason=message;if(++failures>=3)pause(message)}
     fun pause(message:String){reason=message;phase=Phase.PAUSED}
     fun stop(){phase=Phase.STOPPED}
     fun resume(){if(phase==Phase.PAUSED){details=null;spread=null;attacks=null;phase=Phase.DETAILS;failures=0}}
     fun detail(value:Detail){if(phase !in listOf(Phase.DETAILS,Phase.NEXT))return
-        if(value==prior){fail("Same or indistinguishable Pokémon. End the session or check the next page.");return}
+        if(key(value) in visited){fail("Same or indistinguishable Pokémon. End the session or check the next page.");return}
         details=value;spread=null;attacks=null;phase=Phase.APPRAISAL;failures=0}
     fun appraise(value:Spread){if(phase!=Phase.APPRAISAL)return;spread=value;phase=if(scanMoves)Phase.MOVES else Phase.REVIEW;failures=0}
     fun moves(value:Attacks){if(phase==Phase.MOVES){attacks=value;phase=Phase.REVIEW;failures=0}}
+    fun keepUncertainBars(){if(phase==Phase.APPRAISAL){spread=null;phase=if(scanMoves)Phase.MOVES else Phase.REVIEW;failures=0}}
     fun keepUncertainMoves(){if(phase==Phase.MOVES){phase=Phase.REVIEW;failures=0}}
-    fun detailAfterRename(value:Detail){if(phase==Phase.NEXT)prior=value}
-    fun saved(){if(phase==Phase.REVIEW){prior=details;phase=Phase.NEXT;failures=0}}
+    fun detailAfterRename(value:Detail){if(phase==Phase.NEXT)visited.add(key(value))}
+    fun saved(){if(phase==Phase.REVIEW){details?.let{visited.add(key(it))};phase=Phase.NEXT;failures=0}}
 }
 fun <T> consensus(first:T?,second:T?):T?=first?.takeIf{it==second}

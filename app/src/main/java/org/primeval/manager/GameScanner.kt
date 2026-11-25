@@ -43,6 +43,8 @@ class GameScanner:AccessibilityService() {
     private lateinit var option:Button
     private var moveEvidence=""
     private var nextRequested=false
+    private var follow=false
+    private var returnScrolls=0
     private var original:Detail?=null
     private enum class Rename { NONE, VERIFY, EDIT, CHECK }
     private var rename=Rename.NONE
@@ -53,13 +55,18 @@ class GameScanner:AccessibilityService() {
         if(review==null && panel!=null && event?.eventType==AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED && rootInActiveWindow?.packageName?.toString()!=game && startedReading) suspendScan("Foreground changed. Recheck the current Pokémon.")
     }
     private var startedReading=false
-    private fun suspendScan(why:String){if(panel==null)return;generation++;review?.dismiss();review=null;approvedSpecies=null;busy=false;rename=Rename.NONE;session.pause(why);show(why)}
+    private fun log(message:String){
+        val entry=ScanEntry(profileId=profile,message=message)
+        io.execute{runCatching{Store.open(this).catalog().log(entry)}.onFailure{handler.post{android.widget.Toast.makeText(this,"Could not write scanner history",Toast.LENGTH_LONG).show()}}}
+    }
+    private fun suspendScan(why:String){if(panel==null || session.phase==Phase.PAUSED)return;log(why);generation++;review?.dismiss();review=null;approvedSpecies=null;busy=false;rename=Rename.NONE;session.pause(why);show(why)}
     fun finishSession(){
+        if(panel!=null)log("Stopped at ${session.phase}")
         generation++;review?.dismiss();review=null;approvedSpecies=null;busy=false;session.stop();rename=Rename.NONE
         panel?.let{getSystemService(WindowManager::class.java).removeView(it)};panel=null;startedReading=false
     }
-    fun start(id:Long,name:String,selectedMode:String,moves:Boolean){
-        finishSession();profile=id;profileName=name;mode=selectedMode;session=Session(moves);scrolls=0;lastScroll=""
+    fun start(id:Long,name:String,selectedMode:String,moves:Boolean,followLabels:Boolean){
+        finishSession();follow=followLabels;profile=id;profileName=name;mode=selectedMode;session=Session(moves);log("Started $mode");scrolls=0;lastScroll=""
         val box=LinearLayout(this).apply{orientation=LinearLayout.VERTICAL;setPadding(10,4,10,4);setBackgroundColor(0xef163530.toInt())}
         title=TextView(this).apply{setTextColor(-1);textSize=14f}
         box.addView(title);val row=LinearLayout(this);box.addView(row)
@@ -68,7 +75,8 @@ class GameScanner:AccessibilityService() {
         pause=button("Pause"){if(session.phase==Phase.PAUSED){generation++;session.resume();show()}else suspendScan("Paused by user")}
         button("Stop"){finishSession()}
         option=Button(this).apply{isAllCaps=false;box.addView(this);setOnClickListener{
-            if(session.phase==Phase.MOVES){session.keepUncertainMoves();show("Uncertain move evidence will be saved")}
+            if(session.phase==Phase.APPRAISAL){session.keepUncertainBars();show("IVs remain unknown")}
+            else if(session.phase==Phase.MOVES){session.keepUncertainMoves();show("Uncertain move evidence will be saved")}
             else if(session.phase==Phase.NEXT && rename==Rename.NONE && !nextRequested){requestNext()}
         }}
         val params=WindowManager.LayoutParams((resources.displayMetrics.widthPixels*.94).toInt(),-2,WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,PixelFormat.TRANSLUCENT)
@@ -77,7 +85,7 @@ class GameScanner:AccessibilityService() {
     }
     private fun show(message:String=""){
         val prompt=when {
-            rename==Rename.VERIFY->"Return to details. Verify identity before rename."
+            rename==Rename.VERIFY->"Return to details. Apply “$proposed” to the verified Pokémon?"
             rename==Rename.EDIT->"Read the labelled name editor."
             rename==Rename.CHECK->"Read details to verify the saved name."
             else->when(session.phase){
@@ -91,30 +99,37 @@ class GameScanner:AccessibilityService() {
             }
         }
         title.text="$profileName · $mode\n$prompt\n$message".trimEnd()
-        read.text=if(session.phase==Phase.REVIEW)"Review" else "Read"
-        option.visibility=if(!busy && rename==Rename.NONE && (session.phase==Phase.MOVES && session.failures>0 || session.phase==Phase.NEXT && !nextRequested))View.VISIBLE else View.GONE
-        option.text=if(session.phase==Phase.NEXT)"Advance using labelled Next control" else "Keep move reading as uncertain"
+        read.text=when{rename==Rename.VERIFY->"Apply";session.phase==Phase.REVIEW->"Review";else->"Read"}
+        option.visibility=if(!busy && rename==Rename.NONE && (session.phase in listOf(Phase.APPRAISAL,Phase.MOVES) && session.failures>0 || session.phase==Phase.NEXT && !nextRequested))View.VISIBLE else View.GONE
+        option.text=if(session.phase==Phase.NEXT)"Advance using labelled Next control" else if(session.phase==Phase.APPRAISAL)"Keep IVs as uncertain" else "Keep move reading as uncertain"
         read.isEnabled=!busy && session.phase!=Phase.PAUSED
         pause.text=if(session.phase==Phase.PAUSED)"Resume" else "Pause"
     }
-    private fun reject(message:String){busy=false;session.fail(message);if(session.phase==Phase.PAUSED)rename=Rename.NONE;show(message)}
+    private fun reject(message:String){log("${session.phase}: $message");busy=false;session.fail(message);if(session.phase==Phase.PAUSED)rename=Rename.NONE;show(message)}
     private fun window()=rootInActiveWindow?.takeIf{it.packageName?.toString()==game}
     private fun captureStep(){
         if(busy)return
         if(window()==null){reject("Pokémon GO must be in the foreground");return}
         startedReading=true;busy=true;show("Comparing two observations…")
         val token=++generation
+        handler.postDelayed({if(token==generation && busy){generation++;suspendScan("Observation timed out. Check the current page.")}},20000)
         if(rename==Rename.EDIT){editName();return}
         frame(token){first,_-> handler.postDelayed({if(token==generation)frame(token){second,lines->
             busy=false
             val value=consensus(first,second)
             if(value==null){
                 if(session.phase==Phase.MOVES && first==null && second==null)tryScroll(lines)
-                else reject("Uncertain or disagreeing observations")
+                else if(session.phase==Phase.REVIEW && follow && first==null && second==null && returnScrolls<3){
+                    val scroll=nodes().singleOrNull{it.isScrollable}
+                    if(scroll?.performAction(AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD)==true){
+                        returnScrolls++;scheduleRead();show("Returning to detail header")
+                    }else reject("Return to the top of the details page")
+                }else reject("Uncertain or disagreeing observations")
             }else accept(value)
         }},650)}
     }
     private fun frame(token:Int,done:(Any?,List<Line>)->Unit){
+        if(token!=generation)return
         val root=window()
         if(root==null || Build.VERSION.SDK_INT<34){reject("Window capture requires Android 14+ and the game foreground");return}
         takeScreenshotOfWindow(root.windowId,mainExecutor,object:TakeScreenshotCallback{
@@ -150,6 +165,29 @@ class GameScanner:AccessibilityService() {
         return result.filter{it.isVisibleToUser && it.isEnabled && it.packageName?.toString()==game}
     }
     private fun control(label:String)=nodes().singleOrNull{it.isClickable && (it.contentDescription?.toString().equals(label,true) || it.text?.toString().equals(label,true))}
+    private fun scheduleRead(){
+        val token=generation
+        handler.postDelayed({if(token==generation && !busy && window()!=null && session.phase !in listOf(Phase.STOPPED,Phase.PAUSED))captureStep()},900)
+    }
+    private fun followControls(){
+        if(!follow || window()==null || busy || session.failures>0 || review!=null)return
+        when(session.phase){
+            Phase.APPRAISAL->{
+                val appraise=control("Appraise")
+                if(appraise!=null && appraise.performAction(AccessibilityNodeInfo.ACTION_CLICK))scheduleRead()
+                else if(control("Pokémon menu")?.performAction(AccessibilityNodeInfo.ACTION_CLICK)==true){
+                    val token=generation
+                    handler.postDelayed({if(token==generation && session.phase==Phase.APPRAISAL &&
+                        control("Appraise")?.performAction(AccessibilityNodeInfo.ACTION_CLICK)==true)scheduleRead()},600)
+                }
+            }
+            Phase.MOVES,Phase.REVIEW->{
+                if(control("Close appraisal")?.performAction(AccessibilityNodeInfo.ACTION_CLICK)==true || session.phase==Phase.REVIEW)scheduleRead()
+            }
+            Phase.NEXT->if(rename==Rename.NONE && !nextRequested)requestNext()
+            else->Unit
+        }
+    }
     private fun requestNext(){
         val token=++generation;busy=true;show("Checking before advance")
         frame(token){value,_->if(value!=original || value==null){suspendScan("Current page changed before advance");return@frame}
@@ -166,25 +204,25 @@ class GameScanner:AccessibilityService() {
         if(scrolls>=3 || fingerprint==lastScroll || scroll==null || !scroll.performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD)){
             reject("Move section uncertain. Scroll manually or pause.");return
         }
-        scrolls++;lastScroll=fingerprint;show("Scroll requested. Read again to verify the new view.")
+        scrolls++;lastScroll=fingerprint;show("Scroll requested. Read again to verify the new view.");if(follow)scheduleRead()
     }
     private fun accept(value:Any){
         if(rename!=Rename.NONE){verifyRename(value as? Detail);return}
         when(session.phase){
-            Phase.DETAILS,Phase.NEXT->{session.detail(value as Detail);scrolls=0;lastScroll="";moveEvidence="";approvedSpecies=null;customOverride=false;nextRequested=false}
+            Phase.DETAILS,Phase.NEXT->{session.detail(value as Detail);scrolls=0;returnScrolls=0;lastScroll="";moveEvidence="";approvedSpecies=null;customOverride=false;nextRequested=false}
             Phase.APPRAISAL->session.appraise(value as Spread)
             Phase.MOVES->session.moves(value as Attacks)
             Phase.REVIEW->{if(value!=session.details){suspendScan("Details changed before save");return};if(approvedSpecies==null)review(value as Detail) else save();return}
             else->return
         }
-        show(if(session.failures>0)session.reason else value.toString())
+        show(if(session.failures>0)session.reason else value.toString());followControls()
     }
     private fun review(detail:Detail){
-        val s=session.spread ?: return
+        val s=session.spread
         val content=LinearLayout(this).apply{orientation=LinearLayout.VERTICAL;setPadding(32,12,32,12)}
         fun caption(value:String){content.addView(TextView(this).apply{text=value})}
         caption("Current name: ${detail.name} · CP ${detail.cp} · HP ${detail.hp}")
-        caption("Attack ${s.attack}   Defense ${s.defense}   Stamina ${s.stamina}")
+        caption(if(s==null)"Uncertain IVs · automatic rename unavailable" else "Attack ${s.attack}   Defense ${s.defense}   Stamina ${s.stamina}")
         caption(session.attacks?.let{listOfNotNull(it.fast,it.charged,it.second).joinToString(" / ")} ?: "Moves unconfirmed")
         caption("Confirm species. Enter the actual species for a custom nickname.")
         val species=EditText(this).apply{setSingleLine();setText(detail.visible.species ?: detail.name);content.addView(this)}
@@ -203,11 +241,11 @@ class GameScanner:AccessibilityService() {
         }
     }
     private fun save(){
-        val d=session.details ?: return;val s=session.spread ?: return;val a=session.attacks
+        val d=session.details ?: return;val s=session.spread;val a=session.attacks
         val species=approvedSpecies ?: return
-        val record=Specimen(profileId=profile,species=species,nickname=d.name,form=d.visible.form.orEmpty(),shiny=d.visible.shiny,shadow=d.visible.shadow,purified=d.visible.purified,lucky=d.visible.lucky,maxStatus=d.visible.maxStatus,cp=d.cp,hp=d.hp,attack=s.attack,defense=s.defense,stamina=s.stamina,
+        val record=Specimen(profileId=profile,species=species,nickname=d.name,form=d.visible.form.orEmpty(),shiny=d.visible.shiny,shadow=d.visible.shadow,purified=d.visible.purified,lucky=d.visible.lucky,maxStatus=d.visible.maxStatus,cp=d.cp,hp=d.hp,attack=s?.attack,defense=s?.defense,stamina=s?.stamina,
             fast=a?.fast.orEmpty(),charged=a?.charged.orEmpty(),second=a?.second.orEmpty(),
-            confidence="Two matching frames per step; manual species confirmation",verification="Scan reviewed",notes=if(a?.complete==true)"" else "Move slots unconfirmed. $moveEvidence")
+            confidence="Identity 2/2; IVs ${if(s==null)"uncertain" else "2/2"}; moves ${if(a==null)"unconfirmed" else "2/2"}; species user-reviewed",verification="Scan reviewed",notes=if(a?.complete==true)"" else "Move slots unconfirmed. $moveEvidence")
         val prefs=getSharedPreferences("settings",0)
         val template=prefs.getString("template."+species.lowercase(),null) ?: prefs.getString("template",Naming.default)!!
         proposed=runCatching{Naming.preview(record,template)}.getOrDefault("")
@@ -217,10 +255,10 @@ class GameScanner:AccessibilityService() {
             handler.post{if(token==generation){
                 busy=false
                 if(result.isFailure)reject("Local save failed") else {
-                    storedId=result.getOrThrow();session.saved();original=d
-                    if(mode=="Automatic" && (!Naming.protected(record) || customOverride) && proposed.isNotBlank() && proposed!=d.name)rename=Rename.VERIFY
+                    storedId=result.getOrThrow();log("Saved record #$storedId");session.saved();original=d
+                    if(RenamePolicy.eligible(mode,record.copy(id=storedId),proposed,customOverride,!session.scanMoves || a?.complete==true))rename=Rename.VERIFY
                     if(mode=="Assisted" && proposed.isNotBlank())getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText("Nickname",proposed))
-                    show("Saved #${result.getOrNull()}"+if(mode!="Scan only")" · $proposed" else "")
+                    show("Saved #${result.getOrNull()}"+if(mode!="Scan only")" · $proposed" else "");followControls()
                 }
             }}
         }
@@ -230,23 +268,24 @@ class GameScanner:AccessibilityService() {
         when(rename){
             Rename.VERIFY->{
                 if(detail!=old || control("Edit nickname")?.performAction(AccessibilityNodeInfo.ACTION_CLICK)!=true){suspendScan("Identity or unique rename control unavailable");return}
-                rename=Rename.EDIT;show()
+                rename=Rename.EDIT;show();scheduleRead()
             }
             Rename.CHECK->{if(detail!=old.copy(name=proposed)){suspendScan("Rename outcome uncertain. Inspect manually.");return}
                 rename=Rename.NONE;session.detailAfterRename(detail);original=detail
                 val id=storedId;val name=proposed;val token=generation
                 busy=true;show("Recording verified name")
                 io.execute{val result=runCatching{Store.open(this).catalog().verifiedName(id,name)}
-                    handler.post{if(generation==token){busy=false;if(result.getOrNull()==1)show("Verified $name") else suspendScan("Game rename verified. Local record update failed.")}}}}
+                    handler.post{if(generation==token){busy=false;if(result.getOrNull()==1){show("Verified $name");followControls()} else suspendScan("Game rename verified. Local record update failed.")}}}}
             else->suspendScan("Unexpected rename state")
         }
     }
     private fun editName(){
         val editor=nodes().singleOrNull{it.isEditable && it.text?.toString()==original?.name}
-        if(editor==null || control("OK")==null){suspendScan("Name editor could not be verified");return}
+        val titleFound=nodes().any{node->listOf(node.text,node.contentDescription).any{it?.toString()?.lowercase() in setOf("nickname","edit nickname","set nickname","enter nickname")}}
+        if(editor==null || !titleFound || control("OK")==null){suspendScan("Name editor could not be verified");return}
         val args=Bundle().apply{putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE,proposed)}
         if(!editor.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT,args)){suspendScan("Editor refused text");return}
         if(nodes().singleOrNull{it.isEditable}?.text?.toString()!=proposed || control("OK")?.performAction(AccessibilityNodeInfo.ACTION_CLICK)!=true){suspendScan("Check the open editor manually");return}
-        busy=false;rename=Rename.CHECK;show()
+        busy=false;rename=Rename.CHECK;show();scheduleRead()
     }
 }

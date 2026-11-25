@@ -8,7 +8,7 @@ data class Rule(val category:String,val version:String,val source:String,val spe
 data class Advice(val priority:Priority,val reason:String)
 object Advisor {
     fun parse(json:String):List<Rule>{
-        val doc=JSONObject(json);val version=doc.getString("version");val source=doc.getString("source")
+        val doc=JSONObject(json);BattleReference.parse(doc);val version=doc.getString("version");val source=doc.getString("source")
         require(version.isNotBlank() && source.isNotBlank())
         val array=doc.getJSONArray("rules")
         return (0 until array.length()).map{i->val r=array.getJSONObject(i)

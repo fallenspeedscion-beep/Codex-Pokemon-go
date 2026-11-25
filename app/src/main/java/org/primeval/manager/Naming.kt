@@ -27,3 +27,10 @@ object Naming {
     }
     fun protected(record:Specimen)=record.nickname.isBlank() || !record.nickname.equals(record.species,true)
 }
+
+object RenamePolicy {
+    fun eligible(mode:String,record:Specimen,proposal:String,allowCustom:Boolean,movesSufficient:Boolean)=
+        mode=="Automatic" && record.id>0 && record.ivPercent!=null && movesSufficient &&
+        proposal.isNotBlank() && proposal.length<=12 && proposal!=record.nickname &&
+        (!Naming.protected(record) || allowCustom)
+}

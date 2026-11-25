@@ -43,6 +43,7 @@ object CalendarFeed {
             if(f.value.length==8)return LocalDate.parse(f.value,DateTimeFormatter.BASIC_ISO_DATE).atStartOfDay(tz)
             return LocalDateTime.parse(f.value.removeSuffix("Z"),clock).atZone(if(f.value.endsWith("Z"))ZoneOffset.UTC else tz)
         }
+        val cancelFeed="METHOD:CANCEL" in lines
         for(line in lines){
             when{
                 line=="BEGIN:VEVENT"->{require(fields==null);fields=mutableMapOf();depth=0}
@@ -50,7 +51,7 @@ object CalendarFeed {
                     val f=fields ?: error("Unexpected event end")
                     require(depth==0 && listOf("RRULE","RDATE","RECURRENCE-ID","DURATION").none{it in f}){"Unsupported recurring event or duration"}
                     val uid=f["UID"]?.value?.takeIf{it.isNotBlank()} ?: error("Missing event UID")
-                    val cancelled=f["STATUS"]?.value=="CANCELLED" || "METHOD:CANCEL" in lines
+                    val cancelled=f["STATUS"]?.value=="CANCELLED" || cancelFeed
                     val start=f["DTSTART"]?.let(::date)
                     require(start!=null || cancelled){"Missing event start"}
                     val day=f["DTSTART"]?.value?.length==8

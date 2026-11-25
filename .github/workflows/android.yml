@@ -27,3 +27,26 @@ jobs:
         with:
           name: verification-reports
           path: app/build/reports/
+  emulator:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: gradle
+      - name: Grant runner access to hardware acceleration
+        run: sudo setfacl -m u:$(id -un):rw /dev/kvm
+      - uses: reactivecircus/android-emulator-runner@4c44018e59b437e86cdfc41da381398f93ed8808 # v2
+        with:
+          api-level: 35
+          target: default
+          arch: x86_64
+          script: ./gradlew connectedDebugAndroidTest
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        if: always()
+        with:
+          name: emulator-results
+          path: app/build/reports/androidTests/

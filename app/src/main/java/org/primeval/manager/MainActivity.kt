@@ -48,6 +48,7 @@ class MainActivity:Activity(){
         setContentView(root);reload()
     }
     override fun onSaveInstanceState(out:Bundle){super.onSaveInstanceState(out);out.putString("page",page);out.putLongArray("ids",exportIds);out.putBoolean("json",exportJson)}
+    override fun onResume(){super.onResume();if(profiles.isNotEmpty())reload()}
     override fun onDestroy(){io.shutdown();super.onDestroy()}
     private fun toast(msg:String)=Toast.makeText(this,msg,Toast.LENGTH_LONG).show()
     private fun <T> work(job:()->T,done:(T)->Unit){
@@ -141,6 +142,10 @@ class MainActivity:Activity(){
         }
         val preview=label(panel,"");btn(panel,"Preview nickname"){runCatching{val p=record();Naming.preview(p,template(p.species))}.onSuccess{preview.text=it}.onFailure{preview.text=it.message}}
         btn(panel,"Copy preview"){if(preview.text.isNotBlank())runCatching{val p=record();Naming.preview(p,template(p.species))}.onSuccess{getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText("Nickname",it));toast("Copied $it")}}
+        val refs=runCatching{BattleReference.parse(org.json.JSONObject(prefs.getString("rules","{}")!!))}.getOrDefault(emptyList())
+        label(panel,BattleReference.describe(r,refs))
+        val candidates=current().count{it.id!=r.id && it.species.equals(r.species,true) && it.cp==r.cp && it.hp==r.hp}
+        if(candidates>0)label(panel,"$candidates other records share species, CP and HP. Each has a separate local ID.")
         label(panel,"${r.confidence} · ${r.verification}")
         val dialog=AlertDialog.Builder(this).setTitle(if(existing==null)"Add Pokémon" else "Record #${r.id}").setView(ScrollView(this).apply{addView(panel)}).setPositiveButton("Save",null).setNegativeButton("Close",null).create()
         dialog.show();dialog.getButton(-1).setOnClickListener{
@@ -152,6 +157,7 @@ class MainActivity:Activity(){
         label(body,"Tag your Pokémon Appraise, search #Appraise, then open the first details page. Return to this app to start the panel.")
         val mode=choice(body,listOf("Scan only","Assisted","Automatic"))
         val moves=CheckBox(this).apply{text="Read regular attacks";isChecked=true};body.addView(moves)
+        val follow=CheckBox(this).apply{text="Follow labelled appraisal and Next controls"};body.addView(follow)
         label(body,"The optional accessibility service reads the game window on demand. Automatic mode also operates uniquely labelled rename controls. You can pause or stop from its panel.")
         btn(body,"Accessibility settings"){startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))}
         btn(body,"Start with ${profiles.first{it.id==profile}.name}"){
@@ -159,10 +165,12 @@ class MainActivity:Activity(){
             if(service==null){toast("Enable Primeval in Accessibility settings first");return@btn}
             if(android.os.Build.VERSION.SDK_INT<34){toast("Live window capture requires Android 14 or newer");return@btn}
             val p=profiles.first{it.id==profile};val m=mode.selectedItem.toString()
-            fun begin(){service.start(p.id,p.name,m,moves.isChecked);moveTaskToBack(true)}
+            fun begin(){service.start(p.id,p.name,m,moves.isChecked,follow.isChecked);moveTaskToBack(true)}
             if(m=="Automatic")AlertDialog.Builder(this).setTitle("Enable automatic rename for this session?").setMessage("Read the suggested name before confirming. Only confirm default species names. Stop if the game layout or Pokémon changes.").setPositiveButton("Enable"){_,_->begin()}.setNegativeButton("Cancel",null).show() else begin()
         }
         btn(body,"Stop scanner"){GameScanner.active?.finishSession();toast("Stopped");reload()}
+        val history=column();body.addView(history)
+        work({store.catalog().history(profile)}){items->if(items.isNotEmpty()){label(history,"Recent scan history",20,true);items.forEach{label(history,"${java.text.DateFormat.getDateTimeInstance().format(java.util.Date(it.time))} · ${it.message}",14)}}}
     }
     private fun settings(){
         label(body,"Nickname templates",20,true);label(body,Naming.tokens.joinToString("  "){"{$it}"})
@@ -174,6 +182,15 @@ class MainActivity:Activity(){
             val sample=Specimen(profileId=profile,species=key.ifBlank{"Pikachu"},attack=15,defense=15,stamina=15,shiny=true,shadow=true,lucky=true)
             runCatching{Naming.preview(sample,value,40.0)}.onSuccess{prefs.edit().putString(if(key.isBlank())"template" else "template.$key",value).apply();toast("Saved · sample $it")}.onFailure{toast(it.message ?: "Invalid template")}
         }
+        val library=field(body,"Reusable template name")
+        btn(body,"Save to template library"){
+            val name=library.text.toString().trim();if(name.isBlank()){toast("Enter a template name");return@btn}
+            val value=format.text.toString()
+            runCatching{Naming.preview(Specimen(profileId=profile,species="Eevee",attack=1,defense=1,stamina=1),value,20.0)}.onSuccess{
+                prefs.edit().putString("library.$name",value).apply();render()
+            }.onFailure{toast(it.message ?: "Invalid template")}
+        }
+        prefs.all.keys.filter{it.startsWith("library.")}.sorted().forEach{key->btn(body,"Load ${key.removePrefix("library.")}"){format.setText(prefs.getString(key,""));library.setText(key.removePrefix("library."))}}
         label(body,"Export collection",20,true)
         val scope=choice(body,listOf("Active profile","Entire collection","Selected records","Current search results"))
         fun export(json:Boolean){
@@ -195,15 +212,7 @@ class MainActivity:Activity(){
     }
     private fun sources()=prefs.getStringSet("sources",emptySet())!!.toSet()
     private fun setSources(s:Set<String>){prefs.edit().putStringSet("sources",s).apply()}
-    private fun cache(source:String,text:String){
-        val incoming=CalendarFeed.parse(text,source);val dao=store.catalog()
-        store.runInTransaction{
-            val old=dao.events().filter{it.source==source}.associateBy{it.uid}
-            if(!text.contains(Regex("(?m)^METHOD:CANCEL\\s*$")))dao.clearSource(source)
-            dao.cache(incoming.map{e->old[e.uid]?.takeIf{it.sequence>e.sequence} ?: e})
-        }
-    }
-    private fun refresh(source:String){work({cache(source,CalendarFeed.fetch(source))}){setSources(sources()+source);toast("Calendar refreshed");reload()}}
+    private fun refresh(source:String){work({store.cache(source,CalendarFeed.fetch(source))}){setSources(sources()+source);toast("Calendar refreshed");reload()}}
     private fun open(code:Int){startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("*/*"),code)}
     @Deprecated("Platform activity result")
     override fun onActivityResult(requestCode:Int,resultCode:Int,data:Intent?){
@@ -212,7 +221,7 @@ class MainActivity:Activity(){
             10->{val ids=exportIds.toSet();val json=exportJson
                 work({val dao=store.catalog();contentResolver.openOutputStream(uri,"wt")?.bufferedWriter(Charsets.UTF_8)?.use{Export.write(it,dao.all().filter{r->r.id in ids},dao.profiles().associate{p->p.id to p.name},json)} ?: error("Cannot open destination")}){toast("Export saved")}}
             11,12->work({val text=contentResolver.openInputStream(uri)?.use(CalendarFeed::read) ?: error("Cannot read file")
-                if(requestCode==11)cache(uri.toString(),text) else{Advisor.parse(text);prefs.edit().putString("rules",text).apply()}}){
+                if(requestCode==11)store.cache(uri.toString(),text) else{Advisor.parse(text);prefs.edit().putString("rules",text).apply()}}){
                 if(requestCode==11)setSources(sources()+uri.toString());toast("Import complete");reload()}
         }
     }
@@ -224,6 +233,13 @@ class MainActivity:Activity(){
             if(current().isEmpty())label(body,"Add a collection record to evaluate.")
             current().forEach{r->val advice=Advisor.assess(r,c,rules,now)
                 label(body,"${r.species} · ${advice.priority.name.replace('_',' ')}",16,true);label(body,advice.reason,14)}
+        }
+        rules.filter{it.start>now}.map{it.start to it.category}.distinct().sortedBy{it.first}.forEach{(whenAt,category)->
+            val upcoming=current().map{it to Advisor.assess(it,category,rules,whenAt)}.filter{it.second.priority in listOf(Priority.MUST_DO,Priority.RECOMMENDED,Priority.OPTIONAL)}
+            if(upcoming.isNotEmpty()){
+                label(body,"$category · ${java.text.DateFormat.getDateTimeInstance().format(java.util.Date(whenAt))}",18,true)
+                upcoming.forEach{(r,a)->label(body,"${r.species} · ${a.priority.name.replace('_',' ')}\n${a.reason}".replace("\n"," "))}
+            }
         }
         label(body,"Calendar",20,true)
         if(future.isEmpty())label(body,"Import a file or subscribe to a feed in Settings.")

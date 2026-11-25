@@ -19,3 +19,9 @@
 - No current event, event rules, battle rankings or provider subscriptions ship by default. A trusted structured import enables deterministic assessments. Calendar text alone cannot establish move eligibility. Special evolution resources, tasks, payment or geographic conditions need player verification.
 - Android's calendar app handles final event storage and reminders. The app supports exports only. There is no restore importer for collection exports.
 - Debug keys differ across build environments. A stable private release signing identity remains a release task. The app has no production signing key in Git.
+
+### Debug APK signing
+
+The hosted build uses Android Gradle Plugin debug signing on a fresh GitHub runner. The existing Gradle dependency cache excludes the user Android debug keystore. The workflow compares the public SHA-256 certificate fingerprints of the delivered APK and the published 0.2 artifact when available. The APK file checksum is separate from the signer fingerprint.
+
+For future in-place test updates, provision one dedicated private testing keystore in a protected GitHub Actions environment or secret manager. Restore it to a temporary runner file only in trusted publishing jobs, restrict repository/environment access, and back it up securely. Keep key material and passwords out of Git, caches, build logs and artifacts. A new persistent key can maintain continuity for subsequent builds; updating a previously installed build requires its original signer.

@@ -4,6 +4,9 @@ permissions:
   contents: read
 jobs:
   android:
+    permissions:
+      contents: read
+      actions: read
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -18,6 +21,30 @@ jobs:
             JAVA_HOME="$JAVA_HOME_21_X64" "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" 'platforms;android-35' 'build-tools;34.0.0'
           fi
       - run: ./gradlew assembleDebug
+      - name: Compare public APK signer with the 0.2 artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          signer="$ANDROID_HOME/build-tools/34.0.0/apksigner"
+          fingerprint() {
+            "$signer" verify --print-certs "$1" | sed -n 's/^Signer #1 certificate SHA-256 digest: //p'
+          }
+          current=$(fingerprint app/build/outputs/apk/debug/app-debug.apk)
+          test -n "$current"
+          echo "Current APK certificate SHA-256: $current" >> "$GITHUB_STEP_SUMMARY"
+          if gh run download 45618461706 -R "$GITHUB_REPOSITORY" -n primeval-debug -D "$RUNNER_TEMP/ppm-previous"; then
+            previous=$(fingerprint "$RUNNER_TEMP/ppm-previous/app-debug.apk")
+            test -n "$previous"
+            echo "0.2 APK certificate SHA-256: $previous" >> "$GITHUB_STEP_SUMMARY"
+            if [[ "$current" != "$previous" ]]; then
+              echo "::notice::APK signer differs from the published 0.2 build."
+              echo "The published APK signers differ." >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "The published APK signers match." >> "$GITHUB_STEP_SUMMARY"
+            fi
+          else
+            echo "Prior artifact unavailable for certificate comparison." >> "$GITHUB_STEP_SUMMARY"
+          fi
       - run: ./gradlew testDebugUnitTest
       - run: ./gradlew lintDebug
       - name: Report verification errors

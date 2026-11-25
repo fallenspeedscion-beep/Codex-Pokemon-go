@@ -2,7 +2,23 @@ package org.primeval.manager
 
 import kotlin.math.*
 
-data class Target(val x: Int, val y: Int, val width: Int, val height: Int)
+data class Target(val x: Int, val y: Int, val width: Int, val height: Int) {
+    /** Only a uniform resize and window origin are unambiguous. Refuse cropped buffers. */
+    fun inWindow(left: Int, top: Int, w: Int, h: Int): Pair<Int, Int>? {
+        if (
+            width <= 0 ||
+                height <= 0 ||
+                w <= 0 ||
+                h <= 0 ||
+                x !in 0 until width ||
+                y !in 0 until height
+        )
+            return null
+        val scale = w.toDouble() / width
+        if (abs(height * scale - h) > 1.5) return null
+        return (left + (x * scale).toInt()) to (top + (y * scale).toInt())
+    }
+}
 
 enum class NavKind {
     DETAILS_MENU,
@@ -31,11 +47,18 @@ data class Scene(
 }
 
 object ScanNavigation {
+    fun expectedAfter(action: NavKind?, observed: NavKind): Boolean =
+        when (action) {
+            NavKind.MENU_APPRAISE,
+            NavKind.INTRO -> observed != NavKind.DETAILS_MENU
+            else -> true
+        }
+
     private fun green(p: Int): Boolean {
         val r = p shr 16 and 255
         val g = p shr 8 and 255
         val b = p and 255
-        return g > 145 && g - r > 18 && g - b > 8 && r > 65
+        return g > 145 && g - r > 12 && g >= b - 6 && r > 65
     }
 
     private fun teal(p: Int): Boolean {
@@ -78,8 +101,19 @@ object ScanNavigation {
             }
         }
         val strokes = bands.map { it[it.size / 2] }
-        return strokes
-            .windowed(3)
+        // Ignore unrelated bands beside the button (for example, a move or power-up row).
+        val triples =
+            strokes.flatMap { middle ->
+                val column =
+                    strokes.filter {
+                        abs(it.x - middle.x) <= middle.length / 9 &&
+                            abs(it.length - middle.length) <= middle.length / 5
+                    }
+                val i = column.indexOf(middle)
+                if (i in 1 until column.lastIndex) listOf(column.subList(i - 1, i + 2))
+                else emptyList()
+            }
+        return triples
             .mapNotNull { (a, b, c) ->
                 val gap = b.y - a.y
                 if (
@@ -93,17 +127,28 @@ object ScanNavigation {
                     return@mapNotNull null
                 if (!teal(im.rgb(b.x, (a.y + b.y) / 2)) || !teal(im.rgb(b.x, (b.y + c.y) / 2)))
                     return@mapNotNull null
-                // Require dark teal above/below and a bounded coloured disc, not a text list.
-                if (
-                    listOf(-1, 1).any { d ->
-                        val inner = b.y + d * b.length * 2 / 3
-                        val outer = b.y + d * b.length * 3 / 2
-                        inner !in 0 until im.height ||
-                            outer !in 0 until im.height ||
-                            !teal(im.rgb(b.x, inner)) ||
-                            teal(im.rgb(b.x, outer))
+                // Across the disc, find the first rim/background crossing on multiple
+                // rays. A clipped bottom margin or teal game artwork on one side
+                // must not invalidate evidence from the remaining circumference.
+                val radii =
+                    (0..7).mapNotNull ray@{ k ->
+                        val angle = k * Math.PI / 4
+                        fun sample(distance: Int): Int? {
+                            val xx = b.x + (cos(angle) * distance).roundToInt()
+                            val yy = b.y + (sin(angle) * distance).roundToInt()
+                            return if (xx in 0 until im.width && yy in 0 until im.height)
+                                im.rgb(xx, yy)
+                            else null
+                        }
+                        val inner = b.length * 3 / 4
+                        if (sample(inner)?.let(::teal) != true) return@ray null
+                        (inner + 1..b.length * 8 / 5).firstOrNull { r ->
+                            sample(r)?.let { !teal(it) } == true
+                        }
                     }
-                )
+                if (radii.size < 5) return@mapNotNull null
+                val median = radii.sorted()[radii.size / 2]
+                if (radii.count { abs(it - median) <= max(3, b.length / 6) } < 5)
                     return@mapNotNull null
                 Target(b.x, b.y, im.width, im.height)
             }
@@ -164,8 +209,7 @@ object ScanNavigation {
         ) {
             return Scene(NavKind.INTRO, dialogue.firstOrNull()?.let(::point))
         }
-        val appraise = lines.singleOrNull { it.text.trim().equals("Appraise", true) }
-        if (!closing && appraise != null && Recognition.detail(lines) == null) {
+        if (!closing) {
             val peers =
                 lines.filter {
                     it.text.trim().uppercase() in
@@ -180,12 +224,19 @@ object ScanNavigation {
                             "POKÉMON HOME",
                         )
                 }
-            if (
-                peers.map { it.text.uppercase() }.distinct().size >= 2 &&
-                    peers.count { abs(it.right - appraise.right) < im.width / 5 } >= 2 &&
-                    peers.none { it.bottom > appraise.top && it.top < appraise.bottom }
-            )
-                return Scene(NavKind.MENU_APPRAISE, point(appraise))
+            val action =
+                lines
+                    .filter { it.text.trim().equals("Appraise", true) }
+                    .singleOrNull { row ->
+                        val aligned = peers.filter { abs(it.right - row.right) < im.width / 10 }
+                        val above = aligned.filter { it.bottom < row.top }
+                        val below = aligned.filter { it.top > row.bottom }
+                        above.isNotEmpty() &&
+                            below.isNotEmpty() &&
+                            aligned.map { it.text.uppercase() }.distinct().size >= 2 &&
+                            aligned.none { it.bottom > row.top && it.top < row.bottom }
+                    }
+            if (action != null) return Scene(NavKind.MENU_APPRAISE, point(action))
         }
         val detail = Recognition.detail(lines)
         if (detail != null && detail == expected)

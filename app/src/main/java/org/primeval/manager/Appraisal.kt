@@ -12,7 +12,12 @@ data class Rail(
     val confidence: Double,
 )
 
-data class PanelRead(val rails: List<Rail>, val error: String?, val species: String? = null) {
+data class PanelRead(
+    val rails: List<Rail>,
+    val error: String?,
+    val species: String? = null,
+    val rowEvidence: List<Rail?> = rails,
+) {
     val spread
         get() =
             if (error == null && rails.size == 3) Spread(rails[0].iv, rails[1].iv, rails[2].iv)
@@ -24,7 +29,7 @@ data class PanelRead(val rails: List<Rail>, val error: String?, val species: Str
             " " +
             listOf("Attack", "Defense", "HP")
                 .mapIndexed { i, label ->
-                    val rail = rails.getOrNull(i)
+                    val rail = rowEvidence.getOrNull(i)
                     if (rail == null) "$label=missing"
                     else
                         String.format(
@@ -138,6 +143,57 @@ object Appraisal {
         }
     }
 
+    private fun calibratedRow(im: Pixels, left: Int, y: Int, width: Int): Rail? {
+        val guard = max(2, width / 90)
+        if (left < guard || left + width + guard >= im.width) return null
+        val colors = IntArray(width) { material(im.rgb(left + it, y)) }
+        if (
+            material(im.rgb(left - guard, y)) != 0 || material(im.rgb(left + width + guard, y)) != 0
+        )
+            return null
+        val first = colors.indexOfFirst { it > 0 }
+        val last = colors.indexOfLast { it > 0 }
+        if (first !in 0..guard || last !in width - 1 - guard until width) return null
+        fun divider(center: Int): IntRange? {
+            val white = (center - guard..center + guard).filter { colors[it] == 0 }
+            if (white.isEmpty() || white.size != white.last() - white.first() + 1) return null
+            var l = white.first()
+            var r = white.last()
+            while (l > first && colors[l - 1] <= 0) l--
+            while (r < last && colors[r + 1] <= 0) r++
+            return (l..r).takeIf { r - l + 1 <= max(3, width / 28) }
+        }
+        val one = divider(width / 3) ?: return null
+        val two = divider(width * 2 / 3) ?: return null
+        val segments =
+            listOf(first until one.first, one.last + 1 until two.first, two.last + 1..last)
+        val lengths = segments.map { it.last - it.first + 1 }
+        if (lengths.min() * 1.16 < lengths.max()) return null
+        val samples = segments.flatMap { it.map(colors::get) }
+        val lastFill = samples.indexOfLast { it == 2 }
+        val firstEmpty = samples.indexOfFirst { it == 1 }.let { if (it < 0) samples.size else it }
+        val uncertain = firstEmpty - lastFill - 1
+        if (
+            uncertain !in 0..max(2, width / 65) ||
+                samples.take(lastFill + 1).any { it != 2 } ||
+                samples.drop(firstEmpty).any { it != 1 }
+        )
+            return null
+        val low = 15.0 * (lastFill + 1) / samples.size
+        val high = 15.0 * firstEmpty / samples.size
+        val iv = low.roundToInt()
+        val confidence = 1 - max(abs(low - iv), abs(high - iv))
+        if (iv != high.roundToInt() || confidence < 0.75) return null
+        val centers =
+            segments.flatMap { range ->
+                (0..4).map { k ->
+                    colors[range.first + ((k + 0.5) * (range.last - range.first + 1) / 5).toInt()]
+                }
+            }
+        if (centers.take(iv).any { it != 2 } || centers.drop(iv).any { it != 1 }) return null
+        return Rail(left + first, y, last - first + 1, (low + high) / 30, iv, confidence)
+    }
+
     private val labels = listOf("Attack", "Defense", "HP")
 
     fun read(lines: List<Line>, im: Pixels): PanelRead {
@@ -173,9 +229,48 @@ object Appraisal {
                     }
                 center.takeIf { middle.all { it.iv == center.iv } }
             }
+        // A blended pixel at the rounded fill endpoint can split one physical
+        // segment into two colour runs. Locate that row using its two peers,
+        // then require its own caps, dividers, fill extent and 15 cell centres.
+        fun anchored(row: Rail, label: Int) =
+            anchors[label].any { l ->
+                abs(l.left - row.left) < row.width / 8 && row.y - l.bottom in 0..row.width / 5
+            }
+        val byLabel =
+            labels.indices
+                .map { i -> rows.filter { anchored(it, i) }.singleOrNull() }
+                .toMutableList()
+        var repairReason = ""
+        if (byLabel[0] == null && byLabel[1] != null && byLabel[2] != null) {
+            val d = byLabel[1]!!
+            val h = byLabel[2]!!
+            val pitch = h.y - d.y
+            if (
+                pitch in d.width / 6..d.width / 2 &&
+                    abs(d.left - h.left) <= max(2, d.width / 50) &&
+                    abs(d.width - h.width) <= max(2, d.width / 50)
+            ) {
+                val expectedY = d.y - pitch
+                val candidates =
+                    (maxOf(0, expectedY - pitch / 7)..minOf(im.height - 1, expectedY + pitch / 7))
+                        .mapNotNull { y -> calibratedRow(im, d.left, y, d.width) }
+                if (
+                    candidates.size >= maxOf(3, step) &&
+                        candidates.all { it.iv == candidates.first().iv } &&
+                        candidates.zipWithNext().all { (a, b) -> b.y == a.y + 1 }
+                ) {
+                    val measured = candidates[candidates.size / 2]
+                    if (anchors[0].isEmpty() || anchored(measured, 0)) byLabel[0] = measured
+                }
+                repairReason =
+                    "; Attack calibrated scanlines=${candidates.size}, distinct IVs=${candidates.map{it.iv}.distinct().size}"
+            }
+        }
+        val measuredRows = (rows + byLabel.filterNotNull()).distinct()
         val panels = mutableListOf<List<Rail>>()
-        for (a in rows) for (b in rows.filter { it.y - a.y in a.width / 6..a.width / 2 }) for (c in
-            rows.filter { it.y > b.y }) {
+        for (a in measuredRows) for (b in
+            measuredRows.filter { it.y - a.y in a.width / 6..a.width / 2 }) for (c in
+            measuredRows.filter { it.y > b.y }) {
             val gap = b.y - a.y
             val ordered = listOf(a, b, c)
             if (abs(c.y - b.y - gap) > max(step * 2, gap / 9)) continue
@@ -202,18 +297,8 @@ object Appraisal {
             panels.singleOrNull()
                 ?: return PanelRead(
                     emptyList(),
-                    "aligned card count=${panels.size}, candidate rails=${rows.size}; " +
-                        labels
-                            .mapIndexed { i, label ->
-                                "$label=" +
-                                    rows.any { r ->
-                                        anchors[i].any { l ->
-                                            abs(l.left - r.left) < r.width / 8 &&
-                                                r.y - l.bottom in 0..r.width / 5
-                                        }
-                                    }
-                            }
-                            .joinToString(" "),
+                    "aligned card count=${panels.size}, candidate rails=${rows.size}$repairReason",
+                    rowEvidence = byLabel,
                 )
         // A textual rating is used only alongside the card. Badge art alone is ambiguous.
         val stars =

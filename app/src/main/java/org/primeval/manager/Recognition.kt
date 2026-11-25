@@ -155,6 +155,16 @@ class Session(val scanMoves: Boolean) {
         private set
 
     private var retryAppraisal = false
+    private var appraisalMilestone = 0
+
+    // Give a newly verified screen its own observations. Flicker between two
+    // already visited screens cannot refill the retry budget.
+    fun confirmAppraisalStage(stage: Int) {
+        if (phase == Phase.APPRAISAL && stage in 1..3 && stage > appraisalMilestone) {
+            appraisalMilestone = stage
+            failures = 0
+        }
+    }
 
     fun fail(message: String) {
         reason = message
@@ -197,6 +207,7 @@ class Session(val scanMoves: Boolean) {
             fail("Same or indistinguishable Pokémon. End the session or check the next page.")
             return
         }
+        appraisalMilestone = 0
         details = value
         spread = null
         attacks = null

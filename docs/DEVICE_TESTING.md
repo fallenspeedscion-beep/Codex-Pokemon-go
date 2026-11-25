@@ -37,3 +37,12 @@ Place authorised original images in a directory outside the repository. Add an `
 ```
 
 Only the optional instrumentation APK includes those private assets. Keep that APK local. The standard CI workflow and debug application do not include them.
+
+## PPM-003/004 · retest the two reported failures with version 0.3
+
+1. Preserve any existing records before changing installations. Compare the public signer information in the CI build summary first. An APK signed with a different key cannot update the installed app in place.
+2. In Scanner, open **Analyse appraisal screenshot** and select the original Krabby appraisal image. Compare the Attack, Defense and HP measurements with the game. A rejected triple should still display any individually detected rows. A single imported image never verifies a live record.
+3. Put only Krabby in the filtered group, open its details and select the matching Primeval profile. Select **Scan only**, enable **Automatically open appraisal, scroll and advance** and **Record redacted scanner diagnostics**. For the first run turn **Read regular attacks** off to isolate the appraisal and save cycle.
+4. Return to Krabby and leave the screen untouched. Confirm the bottom menu opens, the menu's Appraise row is selected, the card stabilises and the scanner returns to the same header. Stop after the saved ID or the repeated-identity stop. Reopen Collection and compare the single verified record with Krabby, CP 656, maximum HP 60, Dynamax and all three manually checked IVs.
+5. If it pauses, export diagnostics before any manual recovery. Look for semantic availability, visual anchor, capture and window sizes, obstruction or dispatch rejection, and first/second/third card observations. A successful tap must be followed by the expected screen. After manually opening the correct card, Resume can retry the same Pokémon. Use the incomplete-header action only if you intend to save partial data.
+6. After the one-record run succeeds, repeat with moves enabled on a different test Pokémon. Record the game version and display scale with the diagnostic file.

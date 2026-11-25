@@ -55,6 +55,7 @@ class GameScanner : AccessibilityService() {
     private var appraisalSpecies: String? = null
     private var draftStored = false
     private var insertionPending = false
+    private var lastAppraisalAction: NavKind? = null
     private val actionCounts = mutableMapOf<NavKind, Int>()
     private var returnScrolls = 0
 
@@ -229,6 +230,7 @@ class GameScanner : AccessibilityService() {
                     session.resume()
                     closing = false
                     actionCounts.clear()
+                    lastAppraisalAction = null
                     show()
                     if (follow) scheduleRead()
                 } else suspendScan("Paused by user")
@@ -534,6 +536,24 @@ class GameScanner : AccessibilityService() {
             retryScene("Screen transition or target position disagreed")
             return
         }
+        if (!closing) {
+            val milestone =
+                when (second.kind) {
+                    NavKind.MENU_APPRAISE -> 1
+                    NavKind.INTRO -> 2
+                    NavKind.APPRAISAL -> 3
+                    NavKind.UNKNOWN ->
+                        if (
+                            listOf(first, second).all {
+                                it.panel?.rowEvidence?.count { row -> row != null } == 2
+                            }
+                        )
+                            3
+                        else 0
+                    else -> 0
+                }
+            session.confirmAppraisalStage(milestone)
+        }
         if (closing && second.kind == NavKind.DETAILS) {
             closing = false
             trace("appraisal dismissed; header identity verified")
@@ -601,47 +621,130 @@ class GameScanner : AccessibilityService() {
             retryScene("Card changed before dismissal")
             return
         }
+        if (!ScanNavigation.expectedAfter(lastAppraisalAction, second.kind)) {
+            retryScene("Waiting for transition after $lastAppraisalAction; observed ${second.kind}")
+            return
+        }
         val count = actionCounts[second.kind] ?: 0
         if (count >= 2) {
             retryScene("Transition from ${second.kind} unverified; manual intervention required")
             return
         }
-        val semantic =
-            when (second.kind) {
-                NavKind.DETAILS_MENU -> control("Pokémon menu")
-                NavKind.MENU_APPRAISE -> control("Appraise")
-                NavKind.APPRAISAL -> if (closing) control("Close appraisal") else null
-                else -> null
+        val root = window()
+        val all = nodes()
+        val semantic = navigationControl(second.kind, all)
+        val anchor = second.target
+        trace(
+            "action=${second.kind} semantic=${semantic!=null} visibleNodes=${all.size} iconOrRow=${anchor?.let{"${it.x},${it.y}@${it.width}x${it.height}"} ?: "absent"}"
+        )
+        if (root == null) {
+            retryScene("Game window lost before action")
+            return
+        }
+        val wins = windows
+        val gameWin = wins.singleOrNull { it.id == root.windowId && it.isActive }
+        if (gameWin == null) {
+            retryScene("Active game window unavailable before action")
+            return
+        }
+        val bounds = Rect().also { gameWin.getBoundsInScreen(it) }
+        val visual = anchor?.inWindow(bounds.left, bounds.top, bounds.width(), bounds.height())
+        if (anchor != null && visual == null) {
+            retryScene(
+                "Unmatched capture/window geometry: capture=${anchor.width}x${anchor.height}, bounds=$bounds"
+            )
+            return
+        }
+        val rect = semantic?.let { node -> Rect().also { node.getBoundsInScreen(it) } }
+        val useNode =
+            rect != null &&
+                !rect.isEmpty &&
+                (visual == null || rect.contains(visual.first, visual.second))
+        val point = visual ?: if (useNode) rect!!.centerX() to rect.centerY() else null
+        if (point == null) {
+            retryScene("Missing ${second.kind} visual anchor and unique semantic action")
+            return
+        }
+        val (x, y) = point
+        if (!bounds.contains(x, y)) {
+            retryScene("Mapped target outside active game bounds")
+            return
+        }
+        val blocker =
+            wins.firstOrNull {
+                it.layer > gameWin.layer &&
+                    Region().also { region -> it.getRegionInScreen(region) }.contains(x, y)
             }
-        actionCounts[second.kind] = count + 1
-        if (semantic?.performAction(AccessibilityNodeInfo.ACTION_CLICK) == true) {
-            trace("semantic action=${second.kind}")
+        if (blocker != null) {
+            retryScene("Target ($x,$y) obstructed by window type=${blocker.type}")
+            return
+        }
+        if (useNode && semantic?.performAction(AccessibilityNodeInfo.ACTION_CLICK) == true) {
+            actionCounts[second.kind] = count + 1
+            lastAppraisalAction = second.kind
+            trace("semantic action=${second.kind} awaiting transition")
             scheduleRead()
             return
         }
-        if (second.target == null || !tapVerified(second.target, token)) {
-            retryScene("No verified, unobstructed ${second.kind} control")
+        if (visual == null || !tapVerified(x, y, token)) {
+            retryScene("Gesture unavailable for ${second.kind} at ($x,$y)")
             return
         }
-        trace("visual action=${second.kind} attempt=${count+1}")
+        actionCounts[second.kind] = count + 1
+        lastAppraisalAction = second.kind
+        trace("visual action=${second.kind} mapped=$x,$y attempt=${count+1} awaiting transition")
     }
 
-    private fun tapVerified(target: Target, token: Int): Boolean {
-        val root = window() ?: return false
-        val wins = windows
-        val gameWin = wins.singleOrNull { it.id == root.windowId && it.isActive } ?: return false
-        val bounds = Rect().also { gameWin.getBoundsInScreen(it) }
-        if (bounds.width() != target.width || bounds.height() != target.height) return false
-        val x = bounds.left + target.x
-        val y = bounds.top + target.y
-        if (
-            !bounds.contains(x, y) ||
-                wins.any { w ->
-                    w.layer > gameWin.layer &&
-                        Rect().also { w.getBoundsInScreen(it) }.contains(x, y)
-                }
-        )
-            return false
+    private fun navigationControl(
+        kind: NavKind,
+        all: List<AccessibilityNodeInfo>,
+    ): AccessibilityNodeInfo? {
+        val labels =
+            when (kind) {
+                NavKind.DETAILS_MENU ->
+                    setOf(
+                        "pokémon menu",
+                        "pokemon menu",
+                        "open menu",
+                        "menu",
+                        "more options",
+                        "pokemon_menu",
+                    )
+                NavKind.MENU_APPRAISE -> setOf("appraise")
+                NavKind.APPRAISAL -> setOf("close appraisal")
+                else -> return null
+            }
+        val leaf =
+            all.singleOrNull { n ->
+                listOf(n.contentDescription, n.text, n.viewIdResourceName?.substringAfterLast('/'))
+                    .any { it?.toString()?.trim()?.lowercase() in labels }
+            } ?: return null
+        var node: AccessibilityNodeInfo? = leaf
+        val base = Rect().also { leaf.getBoundsInScreen(it) }
+        repeat(4) {
+            val n = node ?: return null
+            if (
+                !n.isEnabled ||
+                    !n.isVisibleToUser ||
+                    n.windowId != leaf.windowId ||
+                    n.packageName?.toString() != game
+            )
+                return null
+            val box = Rect().also { n.getBoundsInScreen(it) }
+            if (
+                box.width() > maxOf(base.width() * 4, resources.displayMetrics.widthPixels / 2) ||
+                    box.height() >
+                        maxOf(base.height() * 3, resources.displayMetrics.widthPixels / 4)
+            )
+                return null
+            if (n.isClickable && n.actionList.any { it.id == AccessibilityNodeInfo.ACTION_CLICK })
+                return n
+            node = n.parent
+        }
+        return null
+    }
+
+    private fun tapVerified(x: Int, y: Int, token: Int): Boolean {
         val path = Path().apply { moveTo(x.toFloat(), y.toFloat()) }
         busy = true
         val sent =
@@ -861,6 +964,7 @@ class GameScanner : AccessibilityService() {
                 closing = false
                 appraisalSpecies = null
                 actionCounts.clear()
+                lastAppraisalAction = null
                 scrolls = 0
                 returnScrolls = 0
                 lastScroll = ""

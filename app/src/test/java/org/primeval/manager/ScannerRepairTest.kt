@@ -151,4 +151,95 @@ class ScannerRepairTest {
         assertEquals(Phase.APPRAISAL, session.phase)
         assertEquals(d, session.details)
     }
+
+    // Synthetic single-pixel antialias seam inside the partly filled last segment.
+    private fun seamCard(value: Int, missing: Boolean = false, wide: Boolean = false): Pixels {
+        val base = card(listOf(value, 15, 14), palette)
+        return object : Pixels by base {
+            override fun rgb(x: Int, y: Int): Int {
+                if (y in 404..415) {
+                    if (missing) return 0xffffff
+                    val boundary = 66 + (value / 5) * 67 + ((value % 5) * 64 + 4) / 5
+                    if (value % 5 != 0 && x in boundary until boundary + (if (wide) 12 else 2))
+                        return 0xe7ceae
+                }
+                return base.rgb(x, y)
+            }
+        }
+    }
+
+    @Test
+    fun attackWithBlendedEndpointUsesMeasuredPeerGeometry() {
+        for (iv in 0..15) {
+            val reading = Appraisal.read(labels, seamCard(iv))
+            assertEquals(reading.summary(), Spread(iv, 15, 14), reading.spread)
+        }
+        assertNull(Appraisal.read(labels, seamCard(12, wide = true)).spread)
+        val missing = Appraisal.read(labels, seamCard(12, missing = true))
+        assertNull(missing.spread)
+        assertNull(missing.rowEvidence[0])
+        assertEquals(15, missing.rowEvidence[1]?.iv)
+        assertEquals(14, missing.rowEvidence[2]?.iv)
+    }
+
+    @Test
+    fun menuStillVerifiedWithClippedBottomAndTintedStrokes() {
+        val clipped =
+            object : Pixels by icon {
+                override val height = 700
+
+                override fun rgb(x: Int, y: Int) =
+                    if (icon.rgb(x, y) == 0x8ad9aa) 0xa2d9db else icon.rgb(x, y)
+            }
+        assertNotNull(ScanNavigation.menuIcon(clipped))
+        val two =
+            object : Pixels by clipped {
+                override fun rgb(x: Int, y: Int) =
+                    if (x in 476..514 && y in 662..664) 0x167e84 else clipped.rgb(x, y)
+            }
+        assertNull(ScanNavigation.menuIcon(two))
+    }
+
+    @Test
+    fun mappedTapRequiresCompatibleWindowShape() {
+        val t = Target(900, 1700, 1000, 2000)
+        assertEquals(470 to 890, t.inWindow(20, 40, 500, 1000))
+        assertNull(t.inWindow(20, 40, 500, 950))
+        assertNull(t.copy(x = 1000).inWindow(20, 40, 500, 1000))
+    }
+
+    @Test
+    fun dimmedTagDoesNotHideTheSeparateMenuCommand() {
+        val d = Recognition.detail(header)!!
+        val peers =
+            listOf("TAG", "APPRAISE", "TRANSFER").mapIndexed { i, v ->
+                Line(v, 355, 350 + 65 * i, 500, 380 + 65 * i)
+            }
+        val scene = ScanNavigation.inspect(header + peers, icon, d, false)
+        assertEquals(NavKind.MENU_APPRAISE, scene.kind)
+        assertEquals(430, scene.target?.y)
+        assertFalse(ScanNavigation.expectedAfter(NavKind.MENU_APPRAISE, NavKind.DETAILS_MENU))
+        assertTrue(ScanNavigation.expectedAfter(NavKind.MENU_APPRAISE, NavKind.APPRAISAL))
+    }
+
+    @Test
+    fun reachingTheCardGetsAFreshButBoundedBudget() {
+        val s = Session(false)
+        val d = Recognition.detail(header)!!
+        s.detail(d)
+        s.fail("menu")
+        s.fail("menu")
+        s.confirmAppraisalStage(3)
+        assertEquals(0, s.failures)
+        repeat(3) {
+            s.confirmAppraisalStage(1)
+            s.confirmAppraisalStage(3)
+            s.fail("Attack missing")
+        }
+        assertEquals(Phase.PAUSED, s.phase)
+        assertEquals(d, s.details)
+        s.resume()
+        assertEquals(Phase.APPRAISAL, s.phase)
+        assertNull(s.spread)
+    }
 }

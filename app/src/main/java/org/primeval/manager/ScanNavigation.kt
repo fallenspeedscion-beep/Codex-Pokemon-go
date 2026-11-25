@@ -117,12 +117,34 @@ object ScanNavigation {
         val dialogue = lines.filter { it.top > im.height * 2 / 3 && it.left < im.width / 4 }
         val text = dialogue.sortedBy { it.top }.joinToString(" ") { it.text }
         val speech = dialogue.firstOrNull { it.text.trim().startsWith("This ", true) }
-        if (panel.spread != null)
+        if (panel.spread != null) {
+            val headerLines =
+                lines.filter {
+                    it.bottom < panel.rails.first().y && !it.text.trim().equals("Attack", true)
+                }
+            val identity = Recognition.detail(headerLines)
+            if (
+                expected == null ||
+                    identity == null ||
+                    identity.name != expected.name ||
+                    identity.cp != expected.cp ||
+                    identity.hp != expected.hp ||
+                    (identity.visible.form != null &&
+                        expected.visible.form != null &&
+                        identity.visible.form != expected.visible.form)
+            )
+                return Scene(
+                    NavKind.UNKNOWN,
+                    panel = panel,
+                    reason = "Appraisal header identity absent or changed",
+                )
             return Scene(
                 NavKind.APPRAISAL,
                 if (Appraisal.species(dialogue) != null) speech?.let(::point) else null,
                 panel,
+                identity,
             )
+        }
         if (
             Appraisal.species(dialogue) != null ||
                 lines.count { it.text in listOf("Defense", "Attack", "HP") } >= 2

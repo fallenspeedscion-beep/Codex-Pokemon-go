@@ -18,3 +18,22 @@ Status on 25 November 2026: physical-device and Pokémon GO acceptance pending. 
 - [ ] If the game exposes no verified editor or confirmation button, record the refusal and use assisted mode. Never substitute coordinates for an edit control.
 
 For each failure record the state, evidence, retry count, stored values and exact visible result. Capture cropped fixtures only with permission. Exclude account identifiers before adding fixtures to source control.
+
+## PPM-001/002 · Pixel 9 Pro XL, Android 17
+
+1. Install version 0.2 (version code 2). For an existing installation use an APK with the same debug signer. A signing conflict requires a different install path or build with the previous key. Uninstalling deletes local records.
+2. In Scanner select **Analyse appraisal screenshot** and pick the original appraisal PNG/JPEG. Compare each displayed IV and ratio with your manual reading. This uses the production OCR and geometry code on one frame. It creates no record. The screenshots embedded in chat were visible for inspection but their original files were unavailable in the workspace.
+3. Manually filter Pokémon GO with **#Appraise**. Start with Krabby alone. Open its details. In Primeval choose the correct profile, **Scan only**, **Read regular attacks**, **Automatically open appraisal, scroll and advance**, and **Record redacted scanner diagnostics**. Enable accessibility and start the session. Bring the open details screen to the foreground. Tap **Read** if it is waiting for the first capture.
+4. Leave the game untouched. Watch for the menu, the separate Appraise command, the leader, stable bars, the closing dialogue, regular moves, the return to the header and the saved record ID. A refusal identifies the failed control or state. Use **Stop** if the screen diverges. At an unresolved appraisal, **Resume** retries using the stored identity. **Save incomplete header and stop** saves only the known header fields with an Incomplete status.
+5. Check the record against the game: Krabby, CP 656, maximum HP 60, Dynamax, three independently labelled IVs, percentage and ordinary attacks. Check for an extra Charged Attack and verify the record after closing and reopening Primeval. A single-item group must produce one record. Inspect the stop at an unchanged identity.
+6. Export the active profile's diagnostics from Scanner. The log contains detector measurements, stage, action attempts and save results. For a second run add one distinguishable Pokémon to the filtered group. Check each record once and verify Stop during a pending observation.
+
+### Private fixture replay
+
+Place authorised original images in a directory outside the repository. Add an `expected.tsv` file containing a filename, Attack, Defense and HP IV for each image, separated by tabs. Use independently checked labels. Run the following with an emulator or device attached.
+
+```sh
+./gradlew connectedDebugAndroidTest -PppmFixtureDir=/absolute/path/to/fixtures -Pandroid.testInstrumentationRunnerArguments.class=org.primeval.manager.ReferenceFixtureTest
+```
+
+Only the optional instrumentation APK includes those private assets. Keep that APK local. The standard CI workflow and debug application do not include them.

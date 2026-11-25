@@ -154,12 +154,19 @@ class Session(val scanMoves: Boolean) {
     var reason = ""
         private set
 
+    private var retryAppraisal = false
+
     fun fail(message: String) {
         reason = message
-        if (++failures >= 3) pause(message)
+        if (++failures >= 3) {
+            val retain = phase == Phase.APPRAISAL
+            pause(message)
+            retryAppraisal = retain
+        }
     }
 
     fun pause(message: String) {
+        retryAppraisal = false
         reason = message
         phase = Phase.PAUSED
     }
@@ -170,6 +177,12 @@ class Session(val scanMoves: Boolean) {
 
     fun resume() {
         if (phase == Phase.PAUSED) {
+            if (retryAppraisal) {
+                phase = Phase.APPRAISAL
+                failures = 0
+                retryAppraisal = false
+                return
+            }
             details = null
             spread = null
             attacks = null

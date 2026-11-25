@@ -130,4 +130,25 @@ class ScannerRepairTest {
         assertTrue(single.end)
         assertEquals(2, single.extend(emptyList())!!.size)
     }
+
+    @Test
+    fun appraisalCannotCrossIdentityAndRetriesRetainDraft() {
+        val d = Recognition.detail(header)!!
+        val img = card(listOf(12, 15, 14), palette)
+        val lines = header + labels + Line("This Krabby was caught on", 12, 680, 340, 710)
+        val card = ScanNavigation.inspect(lines, img, d, false)
+        assertEquals(NavKind.APPRAISAL, card.kind)
+        assertNotNull(card.target)
+        assertEquals(
+            NavKind.UNKNOWN,
+            ScanNavigation.inspect(lines, img, d.copy(hp = 61), false).kind,
+        )
+        val session = Session(true)
+        session.detail(d)
+        repeat(3) { session.fail("alignment") }
+        assertEquals(Phase.PAUSED, session.phase)
+        session.resume()
+        assertEquals(Phase.APPRAISAL, session.phase)
+        assertEquals(d, session.details)
+    }
 }

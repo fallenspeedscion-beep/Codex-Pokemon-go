@@ -28,3 +28,9 @@ The workflow publishes **primeval-debug**, **verification-reports** and **emulat
 The local JVM suite has 26 checks. It covers IV ranges, invalid values, disagreement, move slots, names, Unicode, CSV/JSON, calendar timezones and caching, rule eligibility, interruption, retry limits, duplicate handling, SQLite persistence and migration. Local Android lint reported zero errors and six warnings on the delivered application code.
 
 The Android 15 hosted emulator passed app navigation and synthetic OCR. The software-only cloud emulator initially killed the test process after a startup ANR. A subsequent complete run passed both checks. The instrumentation suite also includes a manual-entry editor scenario that saves a Unicode nickname, corrects an IV and verifies the resulting Room record. Consult the run for the delivered commit for its result.
+
+## PPM-001/002 repair checkpoint
+
+Version 0.2 preserves the database schema and history of the previous build. The rollback source is commit 40e2a4224ad065fb5e82d166bc91b6cec08c67f5. [Previous successful build](https://github.com/fallenspeedscion-beep/Codex-Pokemon-go/actions/runs/45573660325)
+
+The physical Pixel report for 0.1 verified Krabby, CP 656, HP 60 and Dynamax. It also established a failed appraisal and empty collection. Version 0.2 adds a distinct details-menu detector, verified Appraise menu row, dialogue handling, segmented card analysis, header checks, bounded three-frame verification, ordinary move scrolling with overlapping rows, automatic scan-only save and a partial-header fallback. Scanner exposes a private image replay and an optional diagnostic log export. Physical acceptance of these changes is pending. See the PPM-001/002 section in DEVICE_TESTING.md.

@@ -2,11 +2,11 @@
 
 ## Recognition and interaction
 
-- The bundled OCR model reads Latin text offline. English page anchors and bar colours are heuristics. Two matching observations measure agreement. They do not establish a calibrated probability of correctness.
+- The bundled OCR model reads Latin text offline. English page anchors and bar colours are heuristics. Header and move reads use paired observations. Exact IVs require three stable card reads. They do not establish a calibrated probability of correctness.
 - Species can require user correction when the current name is custom. Explicit status/form text can be read. Icon-only shiny, Shadow, Purified, Lucky, Dynamax and Gigantamax indicators need physical-device fixtures and detectors. Unknown statuses stay nullable. The operator can correct them in Collection.
 - The user opens the tagged group and first details manually. The app cannot independently prove that the current game selection is #Appraise. Uncertain transitions require manual navigation. A repeated identity may mean the end, a wrap or two indistinguishable Pokémon.
 - Appraisal requires identifiable Attack, Defense and HP labels and bar geometry. Move recognition requires labelled slots or a recognizable battle-tab damage table. It does not have a comprehensive language or move dictionary. Reading an invisible second move requires scrolling or review. Faint animation, clipping and UI updates can prevent recognition.
-- Accessibility capture requires Android 14 or later and an accessible foreground game window. Restricted capture, missing control labels, overlays and disabled accessibility can block progress. Window screenshots remain in memory; uncertain move text may be saved in the local record.
+- Accessibility capture requires Android 14 or later and an accessible foreground game window. Restricted capture, missing control labels, overlays and disabled accessibility can block progress. Window screenshots remain in memory; raw OCR and location dialogue are excluded from diagnostic exports.
 - Reviewed detail-page gestures can scroll or advance. Each completed gesture triggers another read. Menus, appraisal dismissal and the nickname dialog can still require manual interaction. Automatic text entry only works with an independently verified game editor and confirmation control.
 - The user reviews each record, including its species. Automatic rename additionally needs a valid proposal, two-frame evidence, explicit per-session opt-in, per-record Apply and any necessary custom-name override. Automation has no real-game acceptance results.
 - The 12 UTF-16-unit check is conservative. Game acceptance can vary by symbol. Template level substitution exists, but the scanner does not estimate levels.

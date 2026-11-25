@@ -108,8 +108,27 @@ class GameScanner : AccessibilityService() {
                 event?.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED &&
                 rootInActiveWindow?.packageName?.toString() != game &&
                 startedReading
-        )
-            suspendScan("Foreground changed. Recheck the current Pokémon.")
+        ) {
+            if (rootInActiveWindow?.packageName != null) {
+                suspendScan("Foreground changed. Recheck the current Pokémon.")
+            } else {
+                // The old window can vanish before the game publishes its replacement.
+                // Every capture and gesture still needs a live, active game window.
+                val token = generation
+                handler.postDelayed(
+                    {
+                        if (
+                            token == generation &&
+                                window() == null &&
+                                panel != null &&
+                                review == null
+                        )
+                            suspendScan("Game window unavailable")
+                    },
+                    300,
+                )
+            }
+        }
     }
 
     private var startedReading = false
@@ -211,6 +230,7 @@ class GameScanner : AccessibilityService() {
                     closing = false
                     actionCounts.clear()
                     show()
+                    if (follow) scheduleRead()
                 } else suspendScan("Paused by user")
             }
         button("Stop") { finishSession() }
@@ -266,7 +286,8 @@ class GameScanner : AccessibilityService() {
                         Phase.REVIEW ->
                             "Return to the same details. Review species, appraisal and moves before saving."
                         Phase.NEXT -> "Open the next filtered Pokémon and Read, or Stop at the end."
-                        Phase.PAUSED -> "Resume starts a fresh identity check."
+                        Phase.PAUSED ->
+                            "Check the screen, then Resume or save an incomplete header."
                         Phase.STOPPED -> "Stopped"
                     }
             }
@@ -339,11 +360,11 @@ class GameScanner : AccessibilityService() {
             handler.postDelayed(
                 {
                     if (token == generation)
-                        frame(token) { second, lines ->
+                        frame(token) secondRead@{ second, lines ->
                             busy = false
                             if (first is Scene && second is Scene) {
                                 observeScene(first, second, token)
-                                return@frame
+                                return@secondRead
                             }
                             if (
                                 session.phase == Phase.MOVES &&
@@ -364,14 +385,14 @@ class GameScanner : AccessibilityService() {
                                         accept(
                                             Attacks(merged[0], merged[1], merged.getOrNull(2), true)
                                         )
-                                        return@frame
+                                        return@secondRead
                                     }
                                     tryScroll(lines)
-                                    return@frame
+                                    return@secondRead
                                 }
                                 if (observedRows.isNotEmpty()) {
                                     reject("Regular move rows lost overlap after scroll")
-                                    return@frame
+                                    return@secondRead
                                 }
                             }
                             val value = consensus(first, second)
@@ -507,7 +528,8 @@ class GameScanner : AccessibilityService() {
     }
 
     private fun observeScene(first: Scene, second: Scene, token: Int) {
-        trace("control=${second.kind} ${second.panel?.summary().orEmpty()}")
+        trace("first=${first.kind} ${first.panel?.summary().orEmpty()}")
+        trace("second=${second.kind} ${second.panel?.summary().orEmpty()}")
         if (!first.same(second)) {
             retryScene("Screen transition or target position disagreed")
             return
@@ -534,7 +556,14 @@ class GameScanner : AccessibilityService() {
                     if (generation == token)
                         frame(token) { value, _ ->
                             busy = false
-                            val c = (value as? Scene)?.panel
+                            val last = value as? Scene
+                            val c =
+                                last
+                                    ?.takeIf {
+                                        it.kind == NavKind.APPRAISAL &&
+                                            it.identity == second.identity
+                                    }
+                                    ?.panel
                             if (c == null || !b.agrees(c)) {
                                 retryScene("Appraisal changed during stability check")
                                 return@frame

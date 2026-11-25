@@ -38,7 +38,9 @@ data class MoveViewport(
                 after.indexOfFirst {
                     it.text.equals("New Attack", true) ||
                         it.text.contains("Max Move", true) ||
-                        it.text.equals("Max Battles", true)
+                        it.text.equals("Max Battles", true) ||
+                        it.text.startsWith("Max ", true) ||
+                        it.text.startsWith("G-Max ", true)
                 }
             val body = if (end < 0) after else after.take(end)
             val rows =

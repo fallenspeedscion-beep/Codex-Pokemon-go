@@ -17,7 +17,25 @@ jobs:
           if [[ ! -f "$ANDROID_HOME/platforms/android-35/android.jar" || ! -x "$ANDROID_HOME/build-tools/34.0.0/aapt2" ]]; then
             JAVA_HOME="$JAVA_HOME_21_X64" "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" 'platforms;android-35' 'build-tools;34.0.0'
           fi
-      - run: ./gradlew assembleDebug testDebugUnitTest lintDebug
+      - run: ./gradlew assembleDebug
+      - run: ./gradlew testDebugUnitTest
+      - run: ./gradlew lintDebug
+      - name: Report verification errors
+        if: failure()
+        run: |
+          python3 - <<'PYTHON'
+          from pathlib import Path
+          from xml.etree import ElementTree as ET
+          for path in Path("app/build/test-results").rglob("TEST-*.xml"):
+              for test in ET.parse(path).iter("testcase"):
+                  for failure in test.findall("failure"):
+                      print("::error::" + test.get("name") + " - " + failure.get("message", "")[:500])
+          lint = Path("app/build/reports/lint-results-debug.xml")
+          if lint.exists():
+              for issue in ET.parse(lint).iter("issue"):
+                  if issue.get("severity") in {"Fatal", "Error"}:
+                      print("::error::" + issue.get("id") + " - " + issue.get("message"))
+          PYTHON
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: primeval-debug
